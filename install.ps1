@@ -12,7 +12,11 @@
 #
 # Re-running the script is safe (idempotent).
 
-$ErrorActionPreference = 'Stop'
+# NOTE: We deliberately DO NOT use $ErrorActionPreference = 'Stop' globally,
+# because piping stderr from native processes (like pip's "not on PATH"
+# warnings) trips PowerShell's strict mode and aborts the script even on
+# benign warnings. We check $LASTEXITCODE manually instead.
+$ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'  # speeds up Invoke-WebRequest
 
 $RepoOwner   = 'khadijahumar'
@@ -35,16 +39,37 @@ Write-Host '============================================================' -Foreg
 Write-Host ''
 
 # ---------------------------------------------------------------------------
-# 1. Locate a usable Python interpreter
+# Helpers
 # ---------------------------------------------------------------------------
 
-Write-Step 'Looking for Python >= 3.10 ...'
+# Run a Python command (e.g. "-m pip install ..."). $PyCmd is split into the
+# executable + args so we can call it as a native PowerShell command (no cmd /c).
+# Streams stdout/stderr live to the host. The exit code is left in the
+# caller's $LASTEXITCODE; we deliberately DO NOT use `return` here because
+# PowerShell would mix the return value with any captured stdout.
+function Invoke-PyExe {
+    param(
+        [Parameter(Mandatory)] [string[]] $PyCmd,
+        [Parameter(Mandatory)] [string[]] $ExtraArgs
+    )
+    $exe = $PyCmd[0]
+    $base_args = @()
+    if ($PyCmd.Length -gt 1) { $base_args = $PyCmd[1..($PyCmd.Length - 1)] }
+    $all_args = $base_args + $ExtraArgs
+    & $exe @all_args
+}
 
-function Get-PyVersion($exe) {
+# Get a Python interpreter's "M.m" version string, or $null on failure.
+function Get-PyVersion {
+    param([Parameter(Mandatory)] [string[]] $PyCmd)
+    $exe = $PyCmd[0]
+    $base_args = @()
+    if ($PyCmd.Length -gt 1) { $base_args = $PyCmd[1..($PyCmd.Length - 1)] }
+    $all_args = $base_args + @('-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
     try {
-        $raw = & $exe -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+        $raw = & $exe @all_args 2>$null
         if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
-        return $raw.Trim()
+        return ($raw | Out-String).Trim()
     } catch {
         return $null
     }
@@ -60,24 +85,34 @@ function Test-PyVersion($verString) {
     return $false
 }
 
-$pyExe = $null
-foreach ($candidate in @('py -3', 'python', 'python3')) {
-    $exe = $candidate.Split(' ')[0]
-    $args_extra = if ($candidate.Contains(' ')) { $candidate.Split(' ', 2)[1] } else { $null }
-    $cmd = Get-Command $exe -ErrorAction SilentlyContinue
-    if (-not $cmd) { continue }
-    $verCmd = if ($args_extra) { "$exe $args_extra" } else { $exe }
-    $ver = Get-PyVersion $verCmd
+# ---------------------------------------------------------------------------
+# 1. Locate a usable Python interpreter
+# ---------------------------------------------------------------------------
+
+Write-Step 'Looking for Python >= 3.10 ...'
+
+$candidates = @(
+    @('py',      '-3'),
+    @('python'),
+    @('python3')
+)
+
+$pyCmd = $null
+foreach ($cand in $candidates) {
+    $exe = $cand[0]
+    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
+    $ver = Get-PyVersion $cand
+    $human = ($cand -join ' ')
     if (Test-PyVersion $ver) {
-        $pyExe = $verCmd
-        Write-Ok "$verCmd  (Python $ver)"
+        $pyCmd = $cand
+        Write-Ok "$human  (Python $ver)"
         break
     } elseif ($ver) {
-        Write-Warn2 "$verCmd  -> Python $ver  (need >= $MinPyMajor.$MinPyMinor)"
+        Write-Warn2 "$human  -> Python $ver  (need >= $MinPyMajor.$MinPyMinor)"
     }
 }
 
-if (-not $pyExe) {
+if (-not $pyCmd) {
     Write-Fail 'No suitable Python found.'
     Write-Host ''
     Write-Host 'Install Python 3.10 or newer first:'
@@ -87,6 +122,24 @@ if (-not $pyExe) {
     exit 1
 }
 
+# Find the user's "Scripts" dir for this Python (where pip --user installs
+# console_scripts go). We do this NOW so we can prepend it to PATH for the
+# rest of this session, even before pipx exists. Use sysconfig with the
+# 'nt_user' scheme — this returns the correct version-specific Scripts dir
+# (e.g. "%APPDATA%\Python\Python314\Scripts"), unlike site.USER_BASE which
+# only gives the parent.
+$scriptsArgs = @()
+if ($pyCmd.Length -gt 1) { $scriptsArgs = $pyCmd[1..($pyCmd.Length - 1)] }
+$scriptsArgs += @('-c', "import sysconfig; print(sysconfig.get_path('scripts', scheme='nt_user'))")
+$userScripts = (& $pyCmd[0] @scriptsArgs) 2>$null
+if ($userScripts) {
+    $userScripts = ($userScripts | Out-String).Trim()
+    if ((Test-Path $userScripts) -and (-not ($env:PATH -like "*$userScripts*"))) {
+        $env:PATH = "$userScripts;$env:PATH"
+        Write-Host "  Added to session PATH: $userScripts"
+    }
+}
+
 # ---------------------------------------------------------------------------
 # 2. Ensure pipx is installed and on PATH
 # ---------------------------------------------------------------------------
@@ -94,41 +147,33 @@ if (-not $pyExe) {
 Write-Step 'Checking pipx ...'
 
 function Test-Pipx() {
-    $cmd = Get-Command pipx -ErrorAction SilentlyContinue
-    return [bool]$cmd
+    return [bool] (Get-Command pipx -ErrorAction SilentlyContinue)
 }
 
 if (-not (Test-Pipx)) {
     Write-Host '  pipx not found, installing via pip ...'
-    & cmd /c "$pyExe -m pip install --user --upgrade pip pipx" 2>&1 | Out-Host
+    Invoke-PyExe -PyCmd $pyCmd -ExtraArgs @('-m', 'pip', 'install', '--user', '--upgrade', 'pip', 'pipx')
     if ($LASTEXITCODE -ne 0) {
-        Write-Fail 'pip install pipx failed. See output above.'
+        Write-Fail "pip install pipx failed (exit $LASTEXITCODE)."
         exit 1
     }
-    Write-Host '  Adding pipx to PATH (user) ...'
-    & cmd /c "$pyExe -m pipx ensurepath" 2>&1 | Out-Host
 
-    # ensurepath updates the registry, but the *current* session's PATH still
-    # doesn't have it. Add the user-Scripts dir to this session's PATH.
-    $userBase = & cmd /c "$pyExe -c ""import site; print(site.USER_BASE)""" 2>$null
-    if ($userBase) {
-        $userBase = $userBase.Trim()
-        $userScripts = Join-Path $userBase 'Scripts'
-        if (Test-Path $userScripts) {
-            $env:PATH = "$userScripts;$env:PATH"
-        }
+    Write-Host '  Adding pipx to PATH (user, persistent) ...'
+    Invoke-PyExe -PyCmd $pyCmd -ExtraArgs @('-m', 'pipx', 'ensurepath')
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn2 "pipx ensurepath returned exit $LASTEXITCODE (continuing)."
     }
 }
 
 if (-not (Test-Pipx)) {
-    Write-Fail 'pipx still not found after install.'
-    Write-Host ''
-    Write-Host 'Open a NEW PowerShell window (so PATH is reloaded) and re-run:'
-    Write-Host '  iwr -useb https://raw.githubusercontent.com/khadijahumar/ppd-agent/HEAD/install.ps1 | iex'
-    exit 1
+    # Even after PATH manipulation, pipx still not visible. Fall back to
+    # invoking it via Python: every subsequent "pipx ..." goes through pyCmd.
+    Write-Warn2 'pipx not on PATH yet in this session; using python -m pipx instead.'
+    $pipxRunner = $pyCmd + @('-m', 'pipx')
+} else {
+    Write-Ok 'pipx available'
+    $pipxRunner = @('pipx')
 }
-
-Write-Ok 'pipx available'
 
 # ---------------------------------------------------------------------------
 # 3. Install (or upgrade) the ppd-agent package
@@ -137,20 +182,42 @@ Write-Ok 'pipx available'
 Write-Step "Installing $PackageName from GitHub ..."
 
 # Use 'install --force' so re-running upgrades cleanly.
-& pipx install --force "git+$RepoUrl" 2>&1 | Out-Host
+$exe = $pipxRunner[0]
+$tail = @()
+if ($pipxRunner.Length -gt 1) { $tail = $pipxRunner[1..($pipxRunner.Length - 1)] }
+$pipxArgs = $tail + @('install', '--force', "git+$RepoUrl")
+& $exe @pipxArgs
 if ($LASTEXITCODE -ne 0) {
-    Write-Fail "pipx install failed."
+    Write-Fail "pipx install failed (exit $LASTEXITCODE)."
     exit 1
 }
 Write-Ok "$PackageName installed"
 
+# Resolve the user's home directory. $env:USERPROFILE is the right answer
+# on Windows; PowerShell also exposes $HOME on every platform — fall back
+# to that so the script behaves sensibly when run under pwsh on Linux/Mac.
+$homeBase = $env:USERPROFILE
+if (-not $homeBase) { $homeBase = $HOME }
+if (-not $homeBase) {
+    Write-Fail 'Could not resolve user home directory ($env:USERPROFILE / $HOME both empty).'
+    exit 1
+}
+
+# Make sure the new pipx-managed bin dir is in *this* session's PATH so
+# `ppd` resolves immediately (without opening a new PowerShell window).
+$pipxBin = Join-Path $homeBase '.local\bin'
+if ((Test-Path $pipxBin) -and (-not ($env:PATH -like "*$pipxBin*"))) {
+    $env:PATH = "$pipxBin;$env:PATH"
+    Write-Host "  Added to session PATH: $pipxBin"
+}
+
 # ---------------------------------------------------------------------------
-# 4. Create $env:USERPROFILE\.ppd skeleton + template .env
+# 4. Create %USERPROFILE%\.ppd skeleton + template .env
 # ---------------------------------------------------------------------------
 
 Write-Step 'Creating PPD home directory ...'
 
-$ppdHome = Join-Path $env:USERPROFILE '.ppd'
+$ppdHome = Join-Path $homeBase '.ppd'
 $rawDir     = Join-Path $ppdHome 'data\raw'
 $parquetDir = Join-Path $ppdHome 'data\parquet'
 $plotsDir   = Join-Path $ppdHome 'data\plots'
@@ -162,8 +229,13 @@ New-Item -ItemType Directory -Force -Path $plotsDir    | Out-Null
 
 Write-Ok "PPD home: $ppdHome"
 
-# Trigger the package's own template-write if .env is missing.
-& ppd init --non-interactive 2>&1 | Out-Host
+# Trigger the package's own template-write if .env is missing. We swallow
+# any non-fatal output here.
+if (Get-Command ppd -ErrorAction SilentlyContinue) {
+    & ppd init --non-interactive
+} else {
+    Write-Warn2 "'ppd' not on PATH yet; open a new PowerShell window and run 'ppd init'."
+}
 
 # ---------------------------------------------------------------------------
 # 5. Done
@@ -173,6 +245,9 @@ Write-Host ''
 Write-Host '============================================================' -ForegroundColor Cyan
 Write-Host '  Installation complete!' -ForegroundColor Green
 Write-Host '============================================================' -ForegroundColor Cyan
+Write-Host ''
+Write-Host 'IMPORTANT: open a NEW PowerShell window now so the updated PATH'
+Write-Host '           is fully picked up before running any "ppd" command.'
 Write-Host ''
 Write-Host 'Next steps:'
 Write-Host ''
