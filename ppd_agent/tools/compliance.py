@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .. import format as fmt
 from ..data_loader import load_hr_chem_std, load_hr_mech_std, load_produksi_hrc
 from ..parsing import fmt_number
 
@@ -155,21 +156,23 @@ def check_chem_compliance(coil_id: str, specification: str | None = None) -> str
         rows.append((prod_col, actual_v, lo_v if not lo_unb else None, hi_v if not hi_unb else None, verdict))
 
     overall = "FAIL" if n_fail > 0 else "PASS"
-    out = [
-        f"### Chemical Compliance — Coil {coil_id}",
-        f"Spec used: **{spec_used}**  (matched std: '{std['Specification']}')",
-        f"Result: **{overall}**  ({n_pass} pass, {n_fail} fail, {n_info} N/A)",
-        "",
-        "| Element | Actual | Std Min | Std Max | Verdict |",
-        "|---|---|---|---|---|",
-    ]
+    head = (
+        f"CHEMICAL COMPLIANCE — Coil {coil_id}\n"
+        f"  Spec used : {spec_used}\n"
+        f"  Std match : {std['Specification']}\n"
+        f"  Result    : {overall}  ({n_pass} pass, {n_fail} fail, {n_info} N/A)"
+    )
+    table_rows = []
     for prod_col, actual_v, lo_v, hi_v, verdict in rows:
         a_s = "-" if actual_v is None else fmt_number(actual_v, 4)
         lo_s = "-" if lo_v is None else fmt_number(lo_v, 4)
         hi_s = "-" if hi_v is None else fmt_number(hi_v, 4)
-        flag = "✅" if verdict == "PASS" else ("❌" if verdict == "FAIL" else "ℹ️")
-        out.append(f"| {prod_col} | {a_s} | {lo_s} | {hi_s} | {flag} {verdict} |")
-    return "\n".join(out)
+        table_rows.append([prod_col, a_s, lo_s, hi_s, verdict])
+    table = fmt.fixed_table(
+        ["Element", "Actual", "Std Min", "Std Max", "Verdict"],
+        table_rows,
+    )
+    return f"{head}\n{table}"
 
 
 # ---------------------------------------------------------------------------
@@ -219,24 +222,26 @@ def check_mech_compliance(coil_id: str, specification: str | None = None) -> str
     # — skipped here for brevity. ELO compliance can be added in a follow-up.
 
     overall = "FAIL" if n_fail > 0 else ("PASS" if n_pass > 0 else "INSUFFICIENT_DATA")
-    out = [
-        f"### Mechanical Compliance — Coil {coil_id}",
-        f"Spec used: **{spec_used}**  (matched std: '{std['Specification']}', "
-        f"thickness range {fmt_number(std.get('Dimension Std Thickness Min'))}-"
-        f"{fmt_number(std.get('Dimension Std Thickness Max'))} mm)",
-        f"Coil thickness (TBL_ACT): {fmt_number(thickness_v)} mm",
-        f"Result: **{overall}**  ({n_pass} pass, {n_fail} fail, {n_info} N/A)",
-        "",
-        "| Property | Actual | Std Min | Std Max | Verdict |",
-        "|---|---|---|---|---|",
-    ]
+    head = (
+        f"MECHANICAL COMPLIANCE — Coil {coil_id}\n"
+        f"  Spec used : {spec_used}\n"
+        f"  Std match : {std['Specification']}  "
+        f"(thickness {fmt_number(std.get('Dimension Std Thickness Min'))}–"
+        f"{fmt_number(std.get('Dimension Std Thickness Max'))} mm)\n"
+        f"  Coil TBL  : {fmt_number(thickness_v)} mm\n"
+        f"  Result    : {overall}  ({n_pass} pass, {n_fail} fail, {n_info} N/A)"
+    )
+    table_rows = []
     for prod_col, actual_v, lo_v, hi_v, unit, verdict in rows:
         a_s = "-" if actual_v is None else f"{fmt_number(actual_v, 3)} {unit}"
         lo_s = "-" if lo_v is None else f"{fmt_number(lo_v, 3)} {unit}"
         hi_s = "-" if hi_v is None else f"{fmt_number(hi_v, 3)} {unit}"
-        flag = "✅" if verdict == "PASS" else ("❌" if verdict == "FAIL" else "ℹ️")
-        out.append(f"| {prod_col} | {a_s} | {lo_s} | {hi_s} | {flag} {verdict} |")
-    return "\n".join(out)
+        table_rows.append([prod_col, a_s, lo_s, hi_s, verdict])
+    table = fmt.fixed_table(
+        ["Property", "Actual", "Std Min", "Std Max", "Verdict"],
+        table_rows,
+    )
+    return f"{head}\n{table}"
 
 
 # ---------------------------------------------------------------------------

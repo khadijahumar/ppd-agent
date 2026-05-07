@@ -8,13 +8,13 @@ Given a specification and dimensions, return:
 - thickness tolerance (HR_Thick_Toler)
 - recommended Finish/Coil Temperature codes (FT_CT_Design)
 
-All tools return human-readable markdown strings the agent can pass straight
-back to the user.
+All tools return plain-text strings (no markdown — Telegram-friendly).
 """
 from __future__ import annotations
 
 import pandas as pd
 
+from .. import format as fmt
 from ..data_loader import (
     load_ft_ct_design,
     load_hr_chem_std,
@@ -45,21 +45,24 @@ def _row_thickness_match(row_thickness_range: str, thickness_mm: float | None) -
     return in_range(thickness_mm, rng)
 
 
-def _format_chem_pair(row: pd.Series, element: str, label: str | None = None,
-                     unit: str = "%") -> str | None:
-    """Render '<min> – <max> %' for the C/Mn/... pair if either bound is present."""
-    label = label or element
-    min_col = f"Chemical Standard {element} Minimum"
-    max_col = f"Chemical Standard {element} Maximum"
-    if min_col not in row.index or max_col not in row.index:
+def _pair_or_none(row: pd.Series, lo_col: str, hi_col: str,
+                  hi_sentinel: float = 5.0) -> tuple[float | None, float | None] | None:
+    """Return (lo, hi) tuple. Returns None when the row is unconstrained
+    (both NaN, or lo=0 + hi above ``hi_sentinel`` — i.e. "no spec").
+    """
+    if lo_col not in row.index or hi_col not in row.index:
         return None
-    lo = row.get(min_col)
-    hi = row.get(max_col)
+    lo = row.get(lo_col)
+    hi = row.get(hi_col)
     if pd.isna(lo) and pd.isna(hi):
         return None
-    lo_s = fmt_number(None if pd.isna(lo) else float(lo))
-    hi_s = fmt_number(None if pd.isna(hi) else float(hi))
-    return f"  - **{label}**: {lo_s} – {hi_s} {unit}"
+    lo_v = None if pd.isna(lo) else float(lo)
+    hi_v = None if pd.isna(hi) else float(hi)
+    lo_zero = lo_v is None or lo_v == 0.0
+    hi_unbounded = hi_v is None or hi_v >= hi_sentinel
+    if lo_zero and hi_unbounded:
+        return None
+    return (lo_v, None if hi_unbounded else hi_v)
 
 
 # ---------------------------------------------------------------------------
@@ -94,18 +97,18 @@ def lookup_steel_grade(specification: str, thickness_mm: float | None = None,
         )
 
     rows = sub.head(limit)
-    lines = [
-        f"### Steel Grade Lookup ({len(sub)} match, menampilkan {len(rows)})",
-        "",
-        "| Specification | Thickness Range | HR Spec Code | Steel Grade |",
-        "|---|---|---|---|",
-    ]
-    for _, r in rows.iterrows():
-        lines.append(
-            f"| {r['Specification']} | {r['Thickness Range']} | "
-            f"{r['HR Spec Code']} | {r['Steel Grade']} |"
-        )
-    return "\n".join(lines)
+    head = f"STEEL GRADE LOOKUP   ({len(sub)} match, showing {len(rows)})"
+    table = fmt.fixed_table(
+        ["Specification", "Thickness Range", "HR Spec Code", "Steel Grade"],
+        [
+            [r["Specification"], r["Thickness Range"], r["HR Spec Code"], r["Steel Grade"]]
+            for _, r in rows.iterrows()
+        ],
+    )
+    out = f"{head}\n{table}"
+    if len(sub) > limit:
+        out += f"\n  (+{len(sub) - limit} more hidden)"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -128,41 +131,45 @@ def lookup_chem_standard(specification: str, limit: int = 3) -> str:
     if sub.empty:
         return f"Tidak ditemukan standar kimia untuk specification='{specification}'."
 
-    out: list[str] = []
-    for i, (_, row) in enumerate(sub.head(limit).iterrows()):
-        out.append(f"### Chem Standard – {row['Specification']}")
-        out.append(f"  Dim Thickness: {row['Dim Thickness']}  |  Dim Width: {row['Dim Width']}")
-        out.append("**Komposisi (min – max):**")
+    blocks: list[str] = []
+    for _, row in sub.head(limit).iterrows():
+        head = f"CHEM STANDARD — {row['Specification']}"
+        meta = f"  Dim Thickness: {row['Dim Thickness']}    Dim Width: {row['Dim Width']}"
+        rows: list[list[object]] = []
         for element, unit in _CHEM_ELEMENTS:
-            line = _format_chem_pair(row, element, unit=unit)
-            if line:
-                out.append(line)
-        # group sums + ratios + CEQ + PCM
-        for label, lo_col, hi_col, unit in [
-            ("Nb+Ti+V", "Chemical Standard Nb Ti V Min", "Chemical Standard Nb Ti V Max", "%"),
-            ("Cu+Ni+Cr", "Chemical Standard CuNiCr Min", "Chemical Standard CuNiCr Max", "%"),
-            ("CEQ", "Chemical Standard CEQ Minimum", "Chemical Standard CEQ Maximum", "%"),
-            ("PCM", "Mat Crack Parameter PCM Min", "Mat Crack Parameter PCM Max", ""),
-            ("Cr+Mo+Ni+Cu", "Chemical Std Cr Mo Ni Cu Min", "Chemical Std Cr Mo Ni Cu Max", ""),
-            ("Al/N", "Ratio Al/N Minimum", "Ratio Al/N Maximum", ""),
-            ("Ca/S", "Ratio Ca/S Minimum", "Ratio Ca/S Maximum", ""),
-            ("Ti/N", "Ratio Ti/N Minimum", "Ratio Ti/N Maximum", ""),
-            ("Mn/Si", "Ratio Mn/Si Minimum", "Ratio Mn/Si Maximum", ""),
+            pair = _pair_or_none(
+                row,
+                f"Chemical Standard {element} Minimum",
+                f"Chemical Standard {element} Maximum",
+            )
+            if pair is None:
+                continue
+            rows.append([element, fmt.fmt_range(pair[0], pair[1], decimals=4), unit])
+        for label, lo_col, hi_col, unit, sentinel in [
+            ("Nb+Ti+V", "Chemical Standard Nb Ti V Min", "Chemical Standard Nb Ti V Max", "%", 5.0),
+            ("Cu+Ni+Cr", "Chemical Standard CuNiCr Min", "Chemical Standard CuNiCr Max", "%", 5.0),
+            ("CEQ", "Chemical Standard CEQ Minimum", "Chemical Standard CEQ Maximum", "%", 5.0),
+            ("PCM", "Mat Crack Parameter PCM Min", "Mat Crack Parameter PCM Max", "", 5.0),
+            ("Cr+Mo+Ni+Cu", "Chemical Std Cr Mo Ni Cu Min", "Chemical Std Cr Mo Ni Cu Max", "", 5.0),
+            ("Al/N", "Ratio Al/N Minimum", "Ratio Al/N Maximum", "", 50.0),
+            ("Ca/S", "Ratio Ca/S Minimum", "Ratio Ca/S Maximum", "", 50.0),
+            ("Ti/N", "Ratio Ti/N Minimum", "Ratio Ti/N Maximum", "", 50.0),
+            ("Mn/Si", "Ratio Mn/Si Minimum", "Ratio Mn/Si Maximum", "", 50.0),
         ]:
-            if lo_col in row.index and hi_col in row.index:
-                lo = row.get(lo_col); hi = row.get(hi_col)
-                if pd.notna(lo) or pd.notna(hi):
-                    lo_s = fmt_number(None if pd.isna(lo) else float(lo))
-                    hi_s = fmt_number(None if pd.isna(hi) else float(hi))
-                    out.append(f"  - **{label}**: {lo_s} – {hi_s} {unit}".rstrip())
+            pair = _pair_or_none(row, lo_col, hi_col, hi_sentinel=sentinel)
+            if pair is None:
+                continue
+            rows.append([label, fmt.fmt_range(pair[0], pair[1], decimals=4), unit])
         ceq_code = row.get("Chemical Standard CEQ Code")
         if pd.notna(ceq_code):
-            out.append(f"  - CEQ Code: {ceq_code}")
-        if i < min(limit, len(sub)) - 1:
-            out.append("")
+            rows.append(["CEQ Code", str(ceq_code), ""])
+        table = fmt.fixed_table(["Element", "Range", "Unit"], rows)
+        blocks.append(f"{head}\n{meta}\n{table}")
+
+    out = fmt.join_blocks(*blocks)
     if len(sub) > limit:
-        out.append(f"\n_(+{len(sub) - limit} hasil lain dipotong)_")
-    return "\n".join(out)
+        out += f"\n\n  (+{len(sub) - limit} more match hidden)"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -192,40 +199,51 @@ def lookup_mech_standard(specification: str, thickness_mm: float | None = None,
             + "."
         )
 
-    out: list[str] = [f"### Mech Standard – '{specification}'  ({len(sub)} match, top {min(limit, len(sub))})"]
+    blocks: list[str] = []
     for _, r in sub.head(limit).iterrows():
-        out.append("")
-        out.append(f"**{r['Specification']}**  thickness "
-                   f"{fmt_number(r.get('Dimension Std Thickness Min'))} – "
-                   f"{fmt_number(r.get('Dimension Std Thickness Max'))} mm")
-        out.append(f"  - TS  : {fmt_number(r.get('Mechanical Std Tensile Min'))} – "
-                   f"{fmt_number(r.get('Mechanical Std Tensile Max'))} N/mm²")
-        out.append(f"  - YS  : {fmt_number(r.get('Mechanical Std YS Min'))} – "
-                   f"{fmt_number(r.get('Mechanical Std YS Max'))} N/mm²")
-        if pd.notna(r.get("Mechanical Std Charpy Val Min")) or pd.notna(r.get("Mechanical Std Charpy Val Max")):
-            out.append(f"  - Charpy: {fmt_number(r.get('Mechanical Std Charpy Val Min'))} – "
-                       f"{fmt_number(r.get('Mechanical Std Charpy Val Max'))} J  "
-                       f"(dir: {r.get('Standard Direction Of Impact', '-')})")
-        ratio_min = r.get("YS/UTS RATIO MIN"); ratio_max = r.get("YS/UTS RATIO MAX")
-        if pd.notna(ratio_min) or pd.notna(ratio_max):
-            out.append(f"  - YS/UTS Ratio: {fmt_number(ratio_min)} – {fmt_number(ratio_max)}")
-        for label, lo_col, hi_col in [
-            ("HIC CLR", "HIC CLR MIN", "HIC CLR Max"),
-            ("HIC CSR", "HIC CSR MIN", "HIC CSR Max"),
-            ("HIC CTR", "HIC CTR MIN", "HIC CTR Max"),
-            ("DWTT", "DWTT Test, Indiv.Min%MinHSM", "DWTT Test, Indiv.Min%MaxHSM"),
+        head = f"MECH STANDARD — {r['Specification']}"
+        thickness_line = (
+            f"  Thickness: {fmt_number(r.get('Dimension Std Thickness Min'))}"
+            f" – {fmt_number(r.get('Dimension Std Thickness Max'))} mm"
+        )
+        rows: list[list[object]] = []
+
+        def _add_row(label: str, lo_col: str, hi_col: str, unit: str, sentinel: float = 999.0) -> None:
+            pair = _pair_or_none(r, lo_col, hi_col, hi_sentinel=sentinel)
+            if pair is None:
+                return
+            rows.append([label, fmt.fmt_range(pair[0], pair[1], decimals=2), unit])
+
+        _add_row("TS", "Mechanical Std Tensile Min", "Mechanical Std Tensile Max", "N/mm²")
+        _add_row("YS", "Mechanical Std YS Min", "Mechanical Std YS Max", "N/mm²")
+        _add_row("Charpy", "Mechanical Std Charpy Val Min", "Mechanical Std Charpy Val Max", "J")
+        _add_row("YS/UTS", "YS/UTS RATIO MIN", "YS/UTS RATIO MAX", "", sentinel=99.0)
+        # HIC and DWTT — skip placeholder 0–100
+        for label, lo_col, hi_col, unit in [
+            ("HIC CLR", "HIC CLR MIN", "HIC CLR Max", ""),
+            ("HIC CSR", "HIC CSR MIN", "HIC CSR Max", ""),
+            ("HIC CTR", "HIC CTR MIN", "HIC CTR Max", ""),
+            ("DWTT", "DWTT Test, Indiv.Min%MinHSM", "DWTT Test, Indiv.Min%MaxHSM", "%"),
         ]:
-            lo = r.get(lo_col); hi = r.get(hi_col)
-            if pd.notna(lo) or pd.notna(hi):
-                # Skip noisy 0–100 placeholders
-                lo_v = float(lo) if pd.notna(lo) else None
-                hi_v = float(hi) if pd.notna(hi) else None
-                is_placeholder = (lo_v in (0.0, None)) and (hi_v in (100.0, None))
-                if not is_placeholder:
-                    out.append(f"  - {label}: {fmt_number(lo_v)} – {fmt_number(hi_v)}")
+            pair = _pair_or_none(r, lo_col, hi_col)
+            if pair is None:
+                continue
+            lo_v, hi_v = pair
+            if (lo_v in (0.0, None)) and (hi_v in (100.0, None)):
+                continue  # placeholder
+            rows.append([label, fmt.fmt_range(lo_v, hi_v, decimals=2), unit])
+
+        impact_dir = r.get("Standard Direction Of Impact")
+        if pd.notna(impact_dir):
+            rows.append(["Impact dir", str(impact_dir), ""])
+
+        table = fmt.fixed_table(["Property", "Range", "Unit"], rows)
+        blocks.append(f"{head}\n{thickness_line}\n{table}")
+
+    out = fmt.join_blocks(*blocks)
     if len(sub) > limit:
-        out.append(f"\n_(+{len(sub) - limit} hasil lain dipotong)_")
-    return "\n".join(out)
+        out += f"\n\n  (+{len(sub) - limit} more match hidden)"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -250,19 +268,29 @@ def lookup_elongation_standard(specification: str, thickness_mm: float | None = 
     if sub.empty:
         return f"Tidak ditemukan standar elongation untuk specification='{specification}'."
 
-    lines = [f"### Elongation Standard – '{specification}' ({len(sub)} match)",
-             "",
-             "| Specification | Thickness Range | Gauge Length | ELO min | ELO max |",
-             "|---|---|---|---|---|"]
+    head = f"ELONGATION STANDARD — '{specification}' ({len(sub)} match)"
+    rows: list[list[object]] = []
     for _, r in sub.head(limit).iterrows():
-        lines.append(
-            f"| {r['Specification']} | {r['Thickness Range']} | {r.get('Gauge_Length', '-')} | "
-            f"{fmt_number(r.get('Mech Std Elongation Min'))} % | "
-            f"{fmt_number(r.get('Mech Std Elongation Max'))} % |"
-        )
+        elo_min = r.get("Mech Std Elongation Min")
+        elo_max = r.get("Mech Std Elongation Max")
+        elo_min_v = None if pd.isna(elo_min) else float(elo_min)
+        elo_max_v = None if pd.isna(elo_max) else float(elo_max)
+        if elo_max_v is not None and elo_max_v >= 999:
+            elo_max_v = None
+        rows.append([
+            r["Specification"],
+            r["Thickness Range"],
+            r.get("Gauge_Length", "-"),
+            fmt.fmt_range(elo_min_v, elo_max_v, decimals=1, unit="%"),
+        ])
+    table = fmt.fixed_table(
+        ["Specification", "Thickness Range", "Gauge", "ELO range"],
+        rows,
+    )
+    out = f"{head}\n{table}"
     if len(sub) > limit:
-        lines.append(f"\n_(+{len(sub) - limit} hasil lain dipotong)_")
-    return "\n".join(lines)
+        out += f"\n  (+{len(sub) - limit} more match hidden)"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -284,21 +312,26 @@ def lookup_thickness_tolerance(dim_thickness: str, thickness_mm: float | None = 
     if sub.empty:
         return f"Tidak ditemukan toleransi tebal untuk dim_thickness='{dim_thickness}'."
 
-    lines = [
-        f"### Thickness Tolerance – '{dim_thickness}' ({len(sub)} match)",
-        "",
-        "| Dim Thickness | Thickness Range | Width Range | Tol Min (mm) | Tol Max (mm) | Flex |",
-        "|---|---|---|---|---|---|",
-    ]
+    head = f"THICKNESS TOLERANCE — '{dim_thickness}' ({len(sub)} match)"
+    rows: list[list[object]] = []
     for _, r in sub.head(limit).iterrows():
-        lines.append(
-            f"| {r['Dim Thickness']} | {r['Thickness Range']} | {r['Width Range']} | "
-            f"{fmt_number(r.get('Dimension StdThicknessTol Min'))} | "
-            f"{fmt_number(r.get('Dimension StdThicknessTol Max'))} | {r.get('Flexibility', '-')} |"
-        )
+        rows.append([
+            r["Dim Thickness"],
+            r["Thickness Range"],
+            r["Width Range"],
+            fmt_number(r.get("Dimension StdThicknessTol Min")),
+            fmt_number(r.get("Dimension StdThicknessTol Max")),
+            r.get("Flexibility", "-"),
+        ])
+    table = fmt.fixed_table(
+        ["Dim Thickness", "Thickness Range", "Width Range",
+         "Tol Min", "Tol Max", "Flex"],
+        rows,
+    )
+    out = f"{head}\n{table}"
     if len(sub) > limit:
-        lines.append(f"\n_(+{len(sub) - limit} hasil lain dipotong)_")
-    return "\n".join(lines)
+        out += f"\n  (+{len(sub) - limit} more match hidden)"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -317,17 +350,17 @@ def lookup_ft_ct_design(hr_spec_code: str, thickness_mm: float | None = None,
     if sub.empty:
         return f"Tidak ditemukan rekomendasi FT/CT untuk hr_spec_code='{hr_spec_code}'."
 
-    lines = [
-        f"### FT/CT Design – '{hr_spec_code}' ({len(sub)} match)",
-        "",
-        "| HR Spec Code | Thickness Range | Finish Temp Code | Coil Temp Code |",
-        "|---|---|---|---|",
+    head = f"FT/CT DESIGN — '{hr_spec_code}' ({len(sub)} match)"
+    rows = [
+        [r["HR Spec Code"], r["Thickness Range"],
+         r["Finish Temperature Code"], r["Coil Temperature Code"]]
+        for _, r in sub.head(limit).iterrows()
     ]
-    for _, r in sub.head(limit).iterrows():
-        lines.append(
-            f"| {r['HR Spec Code']} | {r['Thickness Range']} | "
-            f"{r['Finish Temperature Code']} | {r['Coil Temperature Code']} |"
-        )
+    table = fmt.fixed_table(
+        ["HR Spec Code", "Thickness Range", "Finish T Code", "Coil T Code"],
+        rows,
+    )
+    out = f"{head}\n{table}"
     if len(sub) > limit:
-        lines.append(f"\n_(+{len(sub) - limit} hasil lain dipotong)_")
-    return "\n".join(lines)
+        out += f"\n  (+{len(sub) - limit} more match hidden)"
+    return out

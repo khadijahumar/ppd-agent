@@ -18,6 +18,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
 
+from .. import format as fmt  # noqa: E402
 from ..config import CONFIG  # noqa: E402
 from ..data_loader import load_produksi_hrc  # noqa: E402
 from ..parsing import fmt_number  # noqa: E402
@@ -138,41 +139,46 @@ def hrc_filter(
         "only_finished": only_finished,
     })
 
-    out = [
-        "### HRC Filter Result",
-        f"Filters: {flt_str}",
-        f"Matched: **{len(sub):,} coils** (out of {len(df):,} total)",
-    ]
+    head = (
+        "HRC FILTER RESULT\n"
+        f"  Filters : {flt_str}\n"
+        f"  Matched : {len(sub):,} coils (out of {len(df):,} total)"
+    )
 
     if len(sub) == 0:
-        return "\n".join(out)
+        return head
 
-    # quick distribution highlights
-    out.append("")
-    out.append("**Top 5 Spec Code:**")
-    for spec, n in sub["Spec Code"].value_counts().head(5).items():
-        out.append(f"  - {spec}: {n:,}")
-    out.append("")
-    out.append("**Top 5 Customer:**")
-    for cust, n in sub["Customer"].value_counts().head(5).items():
-        out.append(f"  - {cust}: {n:,}")
+    blocks: list[str] = [head]
+    top_spec_rows = [[s, f"{n:,}"] for s, n in sub["Spec Code"].value_counts().head(5).items()]
+    blocks.append(
+        "TOP 5 SPEC CODE\n" + fmt.fixed_table(["Spec Code", "Coils"], top_spec_rows)
+    )
+    top_cust_rows = [[c, f"{n:,}"] for c, n in sub["Customer"].value_counts().head(5).items()]
+    blocks.append(
+        "TOP 5 CUSTOMER\n" + fmt.fixed_table(["Customer", "Coils"], top_cust_rows)
+    )
 
     if sample > 0 and len(sub) > 0:
-        out.append("")
-        out.append(f"**Sample {min(sample, len(sub))} coil:**")
-        out.append("| Coil ID | Spec | Grade | TBL | WD | YS | TS | ELO | FT | CT | Date |")
-        out.append("|---|---|---|---|---|---|---|---|---|---|---|")
+        rows = []
         for _, r in sub.head(sample).iterrows():
             date_s = "-" if pd.isna(r.get("Rolldate")) else pd.Timestamp(r["Rolldate"]).strftime("%Y-%m-%d")
-            out.append(
-                f"| {r.get('Coil ID', '-')} | {r.get('Spec Code', '-')} | {r.get('Grade', '-')} | "
-                f"{fmt_number(r.get('TBL_ACT'))} | {fmt_number(r.get('WD_ACT'))} | "
-                f"{fmt_number(r.get('YS'))} | {fmt_number(r.get('TS'))} | "
-                f"{fmt_number(r.get('ELO'))} | {fmt_number(r.get('FT_AV'))} | "
-                f"{fmt_number(r.get('CT_AV'))} | {date_s} |"
+            rows.append([
+                r.get("Coil ID", "-"), r.get("Spec Code", "-"), r.get("Grade", "-"),
+                fmt_number(r.get("TBL_ACT")), fmt_number(r.get("WD_ACT")),
+                fmt_number(r.get("YS")), fmt_number(r.get("TS")),
+                fmt_number(r.get("ELO")), fmt_number(r.get("FT_AV")),
+                fmt_number(r.get("CT_AV")), date_s,
+            ])
+        blocks.append(
+            f"SAMPLE  ({min(sample, len(sub))} coils)\n"
+            + fmt.fixed_table(
+                ["Coil ID", "Spec", "Grade", "TBL", "WD",
+                 "YS", "TS", "ELO", "FT", "CT", "Date"],
+                rows,
             )
+        )
 
-    return "\n".join(out)
+    return fmt.join_blocks(*blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -207,25 +213,27 @@ def hrc_statistics(
     if len(sub) == 0:
         return "Tidak ada data setelah filter — coba longgarkan kriteria."
 
-    out = [f"### HRC Statistics ({len(sub):,} coils)"]
+    head = f"HRC STATISTICS  ({len(sub):,} coils)"
     if invalid:
-        out.append(f"_(variabel tidak dikenal diabaikan: {', '.join(invalid)})_")
-    out.append("")
-    out.append("| Variable | n | Mean | Std | Min | P25 | Median | P75 | Max |")
-    out.append("|---|---|---|---|---|---|---|---|---|")
+        head += f"\n  (variabel tidak dikenal diabaikan: {', '.join(invalid)})"
+    rows: list[list[object]] = []
     for v in variables:
         s = pd.to_numeric(sub[v], errors="coerce").dropna()
         if len(s) == 0:
-            out.append(f"| {v} | 0 | - | - | - | - | - | - | - |")
+            rows.append([v, "0", "-", "-", "-", "-", "-", "-", "-"])
             continue
-        out.append(
-            f"| **{v}** | {len(s):,} | "
-            f"{fmt_number(float(s.mean()), 3)} | {fmt_number(float(s.std()), 3)} | "
-            f"{fmt_number(float(s.min()), 3)} | {fmt_number(float(s.quantile(0.25)), 3)} | "
-            f"{fmt_number(float(s.median()), 3)} | {fmt_number(float(s.quantile(0.75)), 3)} | "
-            f"{fmt_number(float(s.max()), 3)} |"
-        )
-    return "\n".join(out)
+        rows.append([
+            v, f"{len(s):,}",
+            fmt_number(float(s.mean()), 3), fmt_number(float(s.std()), 3),
+            fmt_number(float(s.min()), 3), fmt_number(float(s.quantile(0.25)), 3),
+            fmt_number(float(s.median()), 3), fmt_number(float(s.quantile(0.75)), 3),
+            fmt_number(float(s.max()), 3),
+        ])
+    table = fmt.fixed_table(
+        ["Variable", "n", "Mean", "Std", "Min", "P25", "Median", "P75", "Max"],
+        rows,
+    )
+    return f"{head}\n{table}"
 
 
 # ---------------------------------------------------------------------------
@@ -278,10 +286,12 @@ def hrc_histogram(
     plt.close(fig)
 
     text = (
-        f"Histogram **{variable}** dibuat.\n"
-        f"- n = {len(s):,}, mean = {fmt_number(float(s.mean()))}, "
-        f"std = {fmt_number(float(s.std()))}, min = {fmt_number(float(s.min()))}, "
-        f"max = {fmt_number(float(s.max()))}"
+        f"HISTOGRAM — {variable}\n"
+        f"  n    : {len(s):,}\n"
+        f"  mean : {fmt_number(float(s.mean()))}\n"
+        f"  std  : {fmt_number(float(s.std()))}\n"
+        f"  min  : {fmt_number(float(s.min()))}\n"
+        f"  max  : {fmt_number(float(s.max()))}"
     )
     return ToolResult(text=text, image_paths=[path])
 
@@ -332,7 +342,11 @@ def hrc_scatter(
     plt.close(fig)
 
     return ToolResult(
-        text=f"Scatter plot **{y} vs {x}** dibuat. Pearson r = {corr:.3f}, n = {len(pair):,}.",
+        text=(
+            f"SCATTER — {y} vs {x}\n"
+            f"  n          : {len(pair):,}\n"
+            f"  Pearson r  : {corr:.3f}"
+        ),
         image_paths=[path],
     )
 
@@ -375,7 +389,11 @@ def hrc_correlation_heatmap(
     plt.close(fig)
 
     return ToolResult(
-        text=f"Correlation heatmap dibuat untuk {len(variables)} variabel pada {len(data):,} sample.",
+        text=(
+            f"CORRELATION HEATMAP\n"
+            f"  variables : {len(variables)}\n"
+            f"  samples   : {len(data):,}"
+        ),
         image_paths=[path],
     )
 
@@ -398,25 +416,41 @@ def hrc_lookup_coil(coil_id: str) -> str:
         return (f"Ditemukan {len(sub)} coil yang cocok dengan '{coil_id}' — terlalu banyak. "
                 f"Berikan Coil ID yang lebih spesifik. Contoh: {', '.join(sub['Coil ID'].head(5).astype(str))}.")
 
-    out = [f"### Coil Details — {len(sub)} match"]
+    blocks: list[str] = [f"COIL DETAILS — {len(sub)} match"]
     for _, r in sub.iterrows():
         date_s = "-" if pd.isna(r.get("Rolldate")) else pd.Timestamp(r["Rolldate"]).strftime("%Y-%m-%d")
-        out.append("")
-        out.append(f"**Coil {r.get('Coil ID')}**")
-        out.append(f"  - Heat / Slab: {r.get('Heat No')} / {r.get('Slab No')}")
-        out.append(f"  - Spec: {r.get('Spec Code')}  |  Grade: {r.get('Grade')}  |  Customer: {r.get('Customer')}")
-        out.append(f"  - Dim: TBL={fmt_number(r.get('TBL_ACT'))} mm, WD={fmt_number(r.get('WD_ACT'))} mm")
-        out.append(f"  - Mech: YS={fmt_number(r.get('YS'))} N/mm², TS={fmt_number(r.get('TS'))} N/mm², "
-                   f"ELO={fmt_number(r.get('ELO'))}, Impact={fmt_number(r.get('Impact'))} J")
-        out.append(f"  - Rolling: FT={fmt_number(r.get('FT_AV'))} °C, CT={fmt_number(r.get('CT_AV'))} °C")
-        out.append("  - Komposisi (%):")
+        identity = [
+            fmt.kv("Coil ID", r.get("Coil ID")),
+            fmt.kv("Heat / Slab", f"{r.get('Heat No')} / {r.get('Slab No')}"),
+            fmt.kv("Spec Code", r.get("Spec Code")),
+            fmt.kv("Grade", r.get("Grade")),
+            fmt.kv("Customer", r.get("Customer")),
+            fmt.kv("Thickness", f"{fmt_number(r.get('TBL_ACT'))} mm"),
+            fmt.kv("Width", f"{fmt_number(r.get('WD_ACT'))} mm"),
+            fmt.kv("YS / TS", f"{fmt_number(r.get('YS'))} / {fmt_number(r.get('TS'))} N/mm²"),
+            fmt.kv("ELO / Impact", f"{fmt_number(r.get('ELO'))} / {fmt_number(r.get('Impact'))}"),
+            fmt.kv("FT / CT", f"{fmt_number(r.get('FT_AV'))} / {fmt_number(r.get('CT_AV'))} °C"),
+            fmt.kv("CEQ / PCM", f"{fmt_number(r.get('CEQ'))} / {fmt_number(r.get('PCM'))}"),
+            fmt.kv("Rolldate", f"{date_s}    Status: {r.get('Sta Akhir')}"),
+        ]
+        comp_pairs = []
         for el in ["C", "MN", "SI", "P", "S", "AL", "N", "NB", "V", "TI", "CU", "NI", "CR", "MO", "B"]:
             v = r.get(el)
             if pd.notna(v):
-                out.append(f"      {el}={fmt_number(float(v))}", )
-        out.append(f"  - CEQ={fmt_number(r.get('CEQ'))}, PCM={fmt_number(r.get('PCM'))}")
-        out.append(f"  - Rolldate: {date_s}  |  Status: {r.get('Sta Akhir')}")
+                comp_pairs.append((el, fmt_number(float(v))))
+        comp_block = ""
+        if comp_pairs:
+            comp_block = "  COMPOSITION (%)\n" + "\n".join(
+                f"    {el:<3} : {val}" for el, val in comp_pairs
+            )
         reasons = [r.get(c) for c in ["Reason 1", "Reason 2", "Reason 3"] if pd.notna(r.get(c))]
-        if reasons:
-            out.append(f"  - Reasons: {', '.join(map(str, reasons))}")
-    return "\n".join(out)
+        reason_block = (
+            "  REASONS\n    " + ", ".join(map(str, reasons))
+            if reasons else ""
+        )
+        blocks.append("\n".join(identity))
+        if comp_block:
+            blocks.append(comp_block)
+        if reason_block:
+            blocks.append(reason_block)
+    return fmt.join_blocks(*blocks)

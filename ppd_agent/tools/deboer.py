@@ -14,6 +14,7 @@ import math
 
 import pandas as pd
 
+from .. import format as fmt
 from ..data_loader import load_chemical_design
 from ..parsing import fmt_number
 
@@ -157,10 +158,12 @@ def deboer_calculate(
 
 
 def _format_results(results: dict[str, dict[str, float]], header: str) -> str:
-    out = [header, "", "| Property | Min | Max |", "|---|---|---|"]
-    for prop, v in results.items():
-        out.append(f"| **{prop}** | {fmt_number(v['min'], 3)} | {fmt_number(v['max'], 3)} |")
-    return "\n".join(out)
+    rows = [
+        [prop, fmt_number(v["min"], 3), fmt_number(v["max"], 3)]
+        for prop, v in results.items()
+    ]
+    table = fmt.fixed_table(["Property", "Min", "Max"], rows)
+    return f"{header}\n{table}"
 
 
 def deboer_calc_text(
@@ -169,9 +172,9 @@ def deboer_calc_text(
     production_min: dict[str, float],
     production_max: dict[str, float],
 ) -> str:
-    """Public version that returns a markdown-formatted result table."""
+    """Public version that returns a plain-text result table."""
     res = deboer_calculate(composition_min, composition_max, production_min, production_max)
-    return _format_results(res, "### Deboer Property Prediction")
+    return _format_results(res, "DEBOER PROPERTY PREDICTION")
 
 
 # ---------------------------------------------------------------------------
@@ -244,23 +247,28 @@ def deboer_predict_for_grade(
         {"Thickness": thickness_max_mm, "CT": ct_max_c, "FT": ft_max_c},
     )
 
-    out = [
-        f"### Deboer Prediction — Steel Grade {info['matched_grade']}",
-        f"_Production_: thickness {thickness_min_mm}–{thickness_max_mm} mm, "
-        f"CT {ct_min_c}–{ct_max_c} °C, FT {ft_min_c}–{ft_max_c} °C",
-        "",
-        "**Komposisi (design min – max):**",
-    ]
+    head = (
+        f"DEBOER PREDICTION — Steel Grade {info['matched_grade']}\n"
+        f"  Production: thickness {thickness_min_mm}–{thickness_max_mm} mm, "
+        f"CT {ct_min_c}–{ct_max_c} °C, FT {ft_min_c}–{ft_max_c} °C"
+    )
+    comp_rows: list[list[object]] = []
     for el in DEBOER_ELEMENTS:
         lo = info["composition_min"][el]
         hi = info["composition_max"][el]
         if lo or hi:
-            out.append(f"  - {el}: {fmt_number(lo)} – {fmt_number(hi)}")
-    out.append("")
-    out.append("**Predicted properties:**")
-    out.append("")
-    out.append("| Property | Min | Max |")
-    out.append("|---|---|---|")
-    for prop, v in res.items():
-        out.append(f"| **{prop}** | {fmt_number(v['min'], 3)} | {fmt_number(v['max'], 3)} |")
-    return "\n".join(out)
+            comp_rows.append([el, fmt_number(lo), fmt_number(hi)])
+    comp_block = ""
+    if comp_rows:
+        comp_block = (
+            "COMPOSITION (design min – max)\n"
+            + fmt.fixed_table(["Element", "Min", "Max"], comp_rows)
+        )
+    pred_rows = [
+        [prop, fmt_number(v["min"], 3), fmt_number(v["max"], 3)]
+        for prop, v in res.items()
+    ]
+    pred_block = "PREDICTED PROPERTIES\n" + fmt.fixed_table(
+        ["Property", "Min", "Max"], pred_rows,
+    )
+    return fmt.join_blocks(head, comp_block, pred_block)

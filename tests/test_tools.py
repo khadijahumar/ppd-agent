@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from ppd_agent.tools import compliance, deboer, hrc, product_design
+from ppd_agent.tools import compliance, deboer, feasibility, hrc, product_design
 
 # Skip everything in this module when the parquet data isn't materialised
 # (e.g. on a fresh CI checkout where prepare_data hasn't been run).
@@ -31,29 +31,43 @@ def test_lookup_steel_grade_no_match() -> None:
 
 def test_lookup_chem_standard() -> None:
     out = product_design.lookup_chem_standard("AS/NZS 3678 - 250")
-    assert "Chem Standard" in out
-    assert "**C**" in out
+    assert "CHEM STANDARD" in out
+    assert "C " in out  # element row
 
 
 def test_lookup_mech_standard() -> None:
     out = product_design.lookup_mech_standard("EN 10025 S275", thickness_mm=10.0)
-    assert "Mech Standard" in out
+    assert "MECH STANDARD" in out
     assert "TS" in out and "YS" in out
 
 
 def test_lookup_elongation_standard() -> None:
     out = product_design.lookup_elongation_standard("ABS AH32")
-    assert "Elongation" in out
+    assert "ELONGATION" in out
 
 
 def test_lookup_thickness_tolerance() -> None:
     out = product_design.lookup_thickness_tolerance("HTS G 3101")
-    assert "Thickness Tolerance" in out
+    assert "THICKNESS TOLERANCE" in out
 
 
 def test_lookup_ft_ct_design() -> None:
     out = product_design.lookup_ft_ct_design("ABSA")
-    assert "FT/CT Design" in out
+    assert "FT/CT DESIGN" in out
+
+
+def test_no_markdown_in_outputs() -> None:
+    """Verify outputs don't contain pipe-tables, ### headers, or **bold**."""
+    samples = [
+        product_design.lookup_steel_grade("KI-A36", thickness_mm=8.0),
+        product_design.lookup_chem_standard("AS/NZS 3678 - 250"),
+        product_design.lookup_mech_standard("EN 10025 S275", thickness_mm=10.0),
+        product_design.lookup_ft_ct_design("ABSA"),
+    ]
+    for s in samples:
+        assert "###" not in s, f"markdown header in: {s[:80]!r}"
+        assert "**" not in s, f"bold in: {s[:80]!r}"
+        assert "|" not in s.replace("±", ""), f"pipe-table in: {s[:80]!r}"
 
 
 # ---- Module 2: HRC ----
@@ -112,6 +126,77 @@ def test_deboer_predict_for_grade() -> None:
 
 def test_full_compliance_report() -> None:
     out = compliance.full_compliance_report("ASC111")
-    assert "Chemical Compliance" in out
-    assert "Mechanical Compliance" in out
+    assert "CHEMICAL COMPLIANCE" in out
+    assert "MECHANICAL COMPLIANCE" in out
     assert "PASS" in out or "FAIL" in out
+    # plain-text only
+    assert "###" not in out
+    assert "**" not in out
+    assert "|" not in out
+
+
+# ---- Module 5: Feasibility ----
+
+
+def test_feasibility_analysis_full_spec() -> None:
+    out = feasibility.feasibility_analysis(
+        "A2010", "JIS G 3101 SS400",
+        thickness_mm=8.0, ft_code="G", ct_code="C",
+    )
+    assert "FEASIBILITY ANALYSIS" in out
+    assert "VERDICT:" in out
+    assert "CHEMICAL COMPATIBILITY" in out
+    assert "MECHANICAL FEASIBILITY" in out
+    assert "HARDENABILITY" in out
+    assert "PRODUCTION HISTORY" in out
+    # plain text
+    assert "###" not in out
+    assert "**" not in out
+    assert "|" not in out
+
+
+def test_feasibility_analysis_shortname_grade() -> None:
+    """User can use 'A2010' instead of '0A2010'."""
+    out = feasibility.feasibility_analysis(
+        "A2010", "JIS G 3101 SS400",
+        thickness_mm=8.0, ft_code="G", ct_code="C",
+    )
+    assert "0A2010" in out  # canonical form should appear
+
+
+def test_feasibility_ambiguous_spec_returns_candidates() -> None:
+    """Shortname 'SS400' matches multiple specs — tool surfaces them."""
+    out = feasibility.feasibility_analysis(
+        "A2010", "SS400",
+        thickness_mm=8.0, ft_code="G", ct_code="C",
+    )
+    assert "ambigu" in out.lower() or "JIS G 3101 SS400" in out
+
+
+def test_feasibility_no_params_runs_sweep() -> None:
+    """When ft/ct/thickness omitted, app sweeps and picks the best."""
+    out = feasibility.feasibility_analysis("A2010", "JIS G 3101 SS400")
+    assert "FEASIBILITY ANALYSIS" in out
+    assert "VERDICT:" in out
+
+
+def test_find_compatible_grades() -> None:
+    out = feasibility.find_compatible_grades("JIS G 3101 SS400", top_n=5)
+    assert "COMPATIBLE GRADES" in out
+    assert "PASS" in out or "never produced" in out or "coils" in out
+
+
+def test_compare_grades() -> None:
+    out = feasibility.compare_grades("A2010", "0A1810")
+    assert "COMPARE GRADES" in out
+    assert "0A2010" in out and "0A1810" in out
+
+
+def test_recommend_production_params() -> None:
+    out = feasibility.recommend_production_params(
+        "A2010", "JIS G 3101 SS400",
+        thickness_mm=8.0, top_n=3,
+    )
+    assert "OPTIMAL PRODUCTION PARAMS" in out
+    # Output should mention FT/CT codes
+    assert "FT " in out and "CT " in out

@@ -12,7 +12,7 @@ from openai import OpenAI
 
 from .config import CONFIG
 from .prompts import SYSTEM_PROMPT
-from .tools import compliance, deboer, hrc, product_design
+from .tools import compliance, deboer, feasibility, hrc, product_design
 from .tools._types import as_str, collect_images
 
 log = logging.getLogger(__name__)
@@ -237,6 +237,56 @@ TOOLS: list[ToolDef] = [
             "specification": _string(),
         }, required=["coil_id"]),
         compliance.full_compliance_report,
+    ),
+
+    # ----- Module 5: Feasibility Analysis -----
+    _t(
+        "feasibility_analysis",
+        "Analisis profesional: bisakah Steel Grade X memenuhi Specification Y? "
+        "Menggabungkan Chemical_Design, HR_Chem_Std, HR_Mech_Std, prediksi Deboer, "
+        "dan history produksi 2021. Output: chem compatibility + mech feasibility "
+        "+ hardenability/weldability (CEQ, PCM) + verdict PASS/FAIL.",
+        _obj({
+            "steel_grade": _string("Steel Grade (lengkap atau shortname, e.g. 'A2010' / '0A2010')."),
+            "specification": _string("Specification (lengkap atau shortname, e.g. 'SS400' / 'JIS G 3101 SS400')."),
+            "thickness_mm": _number("Plate thickness (mm). Optional — kalau dilewati, app sweep beberapa thickness."),
+            "ft_code": _string("FT code (A–Z, skip J/O). Optional."),
+            "ct_code": _string("CT code (A–Z, skip J). Optional."),
+        }, required=["steel_grade", "specification"]),
+        feasibility.feasibility_analysis,
+    ),
+    _t(
+        "find_compatible_grades",
+        "Cari semua Steel Grade yang chemical design-nya cocok untuk Specification target. "
+        "Grade yang sudah pernah diproduksi untuk spec ini ditampilkan duluan.",
+        _obj({
+            "specification": _string("Specification (lengkap atau shortname)."),
+            "top_n": {"type": "integer", "description": "Max grade ditampilkan (default 10)."},
+        }, required=["specification"]),
+        feasibility.find_compatible_grades,
+    ),
+    _t(
+        "compare_grades",
+        "Bandingkan komposisi kimia + CEQ/PCM dua Steel Grade berdampingan, plus jumlah "
+        "produksi 2021 masing-masing.",
+        _obj({
+            "grade_a": _string("Steel Grade pertama."),
+            "grade_b": _string("Steel Grade kedua."),
+        }, required=["grade_a", "grade_b"]),
+        feasibility.compare_grades,
+    ),
+    _t(
+        "recommend_production_params",
+        "Sweep semua kombinasi FT × CT × thickness untuk Steel Grade tertentu, lalu return "
+        "kombinasi paling optimal (paling masuk standar) untuk target specification. Dipakai "
+        "kalau user mau saran parameter rolling untuk grade-spec tertentu.",
+        _obj({
+            "steel_grade": _string("Steel Grade (lengkap atau shortname)."),
+            "target_specification": _string("Target Specification."),
+            "thickness_mm": _number("Plate thickness (mm). Optional — kalau dilewati, sweep default thickness."),
+            "top_n": {"type": "integer", "description": "Berapa kombinasi terbaik dikembalikan (default 5)."},
+        }, required=["steel_grade", "target_specification"]),
+        feasibility.recommend_production_params,
     ),
 ]
 
