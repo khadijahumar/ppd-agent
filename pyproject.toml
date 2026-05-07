@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ppd-agent"
+version = "0.1.0"
+description = "PPD Assistant - AI agent for steel manufacturing (Product Design, HRC Testing, Deboer)"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.50.0",
+    "python-telegram-bot>=21.5",
+    "pandas>=2.2.0",
+    "pyarrow>=15.0.0",
+    "openpyxl>=3.1.0",
+    "xlrd>=2.0.1",
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.5.0",
+]
+
+[project.scripts]
+ppd-prepare-data = "scripts.prepare_data:main"
+ppd-bot = "scripts.run_bot:main"
+
+[tool.setuptools.packages.find]
+include = ["ppd_agent*", "scripts*"]
+exclude = ["tests*", "data*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+# E501: long lines accepted (we have descriptive table rows).
+# E702: occasional `a = ...; b = ...` for compact paired assignments.
+ignore = ["E501", "E702"]
