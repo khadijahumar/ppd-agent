@@ -1,15 +1,18 @@
 """Shared banner / framed-card output for the ``ppd`` CLI.
 
-Visual style is meant to match the Hermes / Gemini / Claude CLI feel:
+The visual style is meant to evoke Hermes / Gemini / Claude CLIs:
 
-* Big ANSI-Shadow "PPD-AGENT" word-mark in yellow with a darker accent on
-  ``AGENT`` so the eye lands on ``PPD``.
+* Big ASCII word-mark for "PPD-AGENT" rendered in yellow.
 * A short tagline + version line under the word-mark.
 * A yellow-bordered framed card showing structural info (paths, counts,
   next steps) when the caller wants it.
 
-Everything is rendered with ``click.secho`` so colors are handled correctly
-on Windows + POSIX terminals.
+We deliberately stick to plain 7-bit ASCII for the box-drawing and status
+icons. The ``install.ps1`` companion has the same constraint (Windows
+PowerShell 5.1 + ``iwr -useb`` mangles non-ASCII bytes), and keeping the
+runtime CLI consistent means a user who installs through the ASCII
+installer won't suddenly get garbled glyphs from ``ppd doctor`` if their
+terminal happens to be on a legacy code page.
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ except ImportError:  # pragma: no cover -- Python < 3.8
     _pkg_version = None  # type: ignore[assignment]
 
 
-TAGLINE = "Production · Planning · Design"
+TAGLINE = "Production / Planning / Design"
 
 
 def app_version() -> str:
@@ -36,24 +39,24 @@ def app_version() -> str:
         return "?.?.?"
 
 
-# ANSI Shadow font for "PPD-AGENT", split into a left half ("PPD") rendered
-# in bright yellow and a right half ("-AGENT") in regular yellow so the
-# wordmark has visual hierarchy without needing 256-color escape codes.
+# figlet "big" font for "PPD-AGENT", split into a left half ("PPD") in
+# bright yellow and a right half ("-AGENT") in regular yellow so the
+# wordmark has visual hierarchy.
 _BANNER_LEFT = (
-    "  ██████╗ ██████╗ ██████╗ ",
-    "  ██╔══██╗██╔══██╗██╔══██╗",
-    "  ██████╔╝██████╔╝██║  ██║",
-    "  ██╔═══╝ ██╔═══╝ ██║  ██║",
-    "  ██║     ██║     ██████╔╝",
-    "  ╚═╝     ╚═╝     ╚═════╝ ",
+    "   _____  _____  _____ ",
+    "  |  __ \\|  __ \\|  __ \\",
+    "  | |__) | |__) | |  | |",
+    "  |  ___/|  ___/| |  | |",
+    "  | |    | |    | |__| |",
+    "  |_|    |_|    |_____/",
 )
 _BANNER_RIGHT = (
-    "       █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
-    "      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
-    "█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ",
-    "╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ",
-    "      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ",
-    "      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ",
+    "                _____ ______ _   _ _______",
+    "         /\\    / ____|  ____| \\ | |__   __|",
+    " ______ /  \\  | |  __| |__  |  \\| |  | |   ",
+    "|______/ /\\ \\ | | |_ |  __| | . ` |  | |   ",
+    "      / ____ \\| |__| | |____| |\\  |  | |   ",
+    "     /_/    \\_\\_____ |______|_| \\_|  |_|   ",
 )
 
 
@@ -65,7 +68,7 @@ def print_banner() -> None:
         click.secho(right, fg="yellow")
     click.echo()
     click.secho(
-        f"  {TAGLINE}   ·   v{app_version()}",
+        f"  {TAGLINE}   --   v{app_version()}",
         fg="bright_black",
     )
     click.echo()
@@ -74,14 +77,14 @@ def print_banner() -> None:
 def print_card(lines: Iterable[str], width: int = 64) -> None:
     """Render a yellow-bordered framed card with the given body lines."""
     body = list(lines)
-    top = "  ╔" + ("═" * width) + "╗"
-    bot = "  ╚" + ("═" * width) + "╝"
+    top = "  +" + ("-" * width) + "+"
+    bot = "  +" + ("-" * width) + "+"
     click.secho(top, fg="yellow")
     for line in body:
         pad = max(width - _visible_len(line), 0)
-        click.secho("  ║", fg="yellow", nl=False)
+        click.secho("  |", fg="yellow", nl=False)
         click.echo(line + (" " * pad), nl=False)
-        click.secho("║", fg="yellow")
+        click.secho("|", fg="yellow")
     click.secho(bot, fg="yellow")
 
 
@@ -102,20 +105,20 @@ def _visible_len(s: str) -> int:
 
 
 def print_step(msg: str) -> None:
-    click.secho(f"  ▶ {msg}", fg="cyan")
+    click.secho(f"  >> {msg}", fg="cyan")
 
 
 def print_ok(msg: str) -> None:
-    click.secho(f"  ✓ {msg}", fg="green")
+    click.secho(f"  [+] {msg}", fg="green")
 
 
 def print_warn(msg: str) -> None:
-    click.secho(f"  ⚠ {msg}", fg="yellow")
+    click.secho(f"  [!] {msg}", fg="yellow")
 
 
 def print_fail(msg: str) -> None:
-    click.secho(f"  ✗ {msg}", fg="red")
+    click.secho(f"  [x] {msg}", fg="red")
 
 
 def print_info(msg: str) -> None:
-    click.secho(f"    {msg}", fg="bright_black")
+    click.secho(f"      {msg}", fg="bright_black")

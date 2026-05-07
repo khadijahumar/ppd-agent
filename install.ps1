@@ -4,6 +4,12 @@
 #   iwr -useb https://raw.githubusercontent.com/khadijahumar/ppd-agent/HEAD/install.ps1 | iex
 #
 # Re-running the script is safe (idempotent).
+#
+# IMPORTANT: this script is intentionally restricted to plain 7-bit ASCII.
+# In Windows PowerShell 5.1, `iwr -useb` decodes the response body with
+# ISO-8859-1 when the server doesn't advertise a UTF-8 charset, which mangles
+# any non-ASCII bytes BEFORE the script's own [Console]::OutputEncoding line
+# can run. Anything outside 0x20-0x7E is therefore off-limits in this file.
 
 # We deliberately DO NOT use $ErrorActionPreference = 'Stop' globally,
 # because piping stderr from native processes (like pip's "not on PATH"
@@ -12,68 +18,58 @@
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
 
-# Force UTF-8 output so the box-drawing characters in the banner render
-# properly even on Windows PowerShell 5.1 hosts that default to the OEM
-# code page.
+# Best-effort UTF-8 console output. Harmless if it fails on legacy hosts.
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
-try { $OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 $RepoOwner   = 'khadijahumar'
 $RepoName    = 'ppd-agent'
 $RepoUrl     = "https://github.com/$RepoOwner/$RepoName.git"
 $PackageName = 'ppd-agent'
 $AppVersion  = '0.1.0'
-$Tagline     = 'Production · Planning · Design'
+$Tagline     = 'Production / Planning / Design'
 $MinPyMajor  = 3
 $MinPyMinor  = 10
 
 # ---------------------------------------------------------------------------
-# Pretty printing
+# Pretty printing  (ASCII-only)
 # ---------------------------------------------------------------------------
 
 function Write-Banner {
     Write-Host ''
-    # ANSI Shadow font for "PPD-AGENT" — yellow, with the right half
-    # ("AGENT") rendered in a darker accent so the eye lands on "PPD".
+    # figlet "big" font for "PPD-AGENT". Pure ASCII; renders the same on
+    # every Windows console regardless of code page.
     $left = @(
-        '  ██████╗ ██████╗ ██████╗ ',
-        '  ██╔══██╗██╔══██╗██╔══██╗',
-        '  ██████╔╝██████╔╝██║  ██║',
-        '  ██╔═══╝ ██╔═══╝ ██║  ██║',
-        '  ██║     ██║     ██████╔╝',
-        '  ╚═╝     ╚═╝     ╚═════╝ '
+        '   _____  _____  _____ ',
+        '  |  __ \|  __ \|  __ \',
+        '  | |__) | |__) | |  | |',
+        '  |  ___/|  ___/| |  | |',
+        '  | |    | |    | |__| |',
+        '  |_|    |_|    |_____/'
     )
     $right = @(
-        '       █████╗  ██████╗ ███████╗███╗   ██╗████████╗',
-        '      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝',
-        '█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ',
-        '╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ',
-        '      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ',
-        '      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   '
+        '                _____ ______ _   _ _______',
+        '         /\    / ____|  ____| \ | |__   __|',
+        ' ______ /  \  | |  __| |__  |  \| |  | |   ',
+        '|______/ /\ \ | | |_ |  __| | . ` |  | |   ',
+        '      / ____ \| |__| | |____| |\  |  | |   ',
+        '     /_/    \_\_____ |______|_| \_|  |_|   '
     )
     for ($i = 0; $i -lt $left.Length; $i++) {
         Write-Host $left[$i]  -ForegroundColor Yellow      -NoNewline
         Write-Host $right[$i] -ForegroundColor DarkYellow
     }
     Write-Host ''
-    Write-Host "  $Tagline   ·   v$AppVersion" -ForegroundColor DarkGray
+    Write-Host "  $Tagline   --   v$AppVersion" -ForegroundColor DarkGray
     Write-Host ''
 }
 
-function Write-Step($msg) { Write-Host "  ▶ $msg"      -ForegroundColor Cyan }
-function Write-Ok($msg)   { Write-Host "  ✓ $msg"      -ForegroundColor Green }
-function Write-Warn2($msg){ Write-Host "  ⚠ $msg"      -ForegroundColor Yellow }
-function Write-Fail($msg) { Write-Host "  ✗ $msg"      -ForegroundColor Red }
-function Write-Info($msg) { Write-Host "    $msg"      -ForegroundColor DarkGray }
+function Write-Step($msg) { Write-Host "  >> $msg"     -ForegroundColor Cyan }
+function Write-Ok($msg)   { Write-Host "  [+] $msg"    -ForegroundColor Green }
+function Write-Warn2($msg){ Write-Host "  [!] $msg"    -ForegroundColor Yellow }
+function Write-Fail($msg) { Write-Host "  [x] $msg"    -ForegroundColor Red }
+function Write-Info($msg) { Write-Host "      $msg"    -ForegroundColor DarkGray }
 
-function Write-Rule {
-    Write-Host ('  ' + ('─' * 64))                     -ForegroundColor DarkGray
-}
-
-# Render a yellow-bordered "card" / framed box with body lines (one entry =
-# one rendered line). Width = 64 inner cols. ANSI color codes inside body
-# strings are NOT counted by .Length, so we compute padding from the
-# *visible* length passed alongside.
+# Render a yellow-bordered "card" with body lines, ASCII-only edges.
 function Write-Card {
     param(
         [Parameter(Mandatory)]
@@ -82,17 +78,15 @@ function Write-Card {
         [string[]] $Lines
     )
     $innerWidth = 64
-    $top    = '  ╔' + ('═' * $innerWidth) + '╗'
-    $bottom = '  ╚' + ('═' * $innerWidth) + '╝'
-    Write-Host $top    -ForegroundColor Yellow
+    $top    = '  +' + ('-' * $innerWidth) + '+'
+    $bottom = '  +' + ('-' * $innerWidth) + '+'
+    Write-Host $top -ForegroundColor Yellow
     foreach ($line in $Lines) {
-        # Pad-right to inner width, accounting for visual length only.
-        $visible = $line
-        $pad = $innerWidth - $visible.Length
+        $pad = $innerWidth - $line.Length
         if ($pad -lt 0) { $pad = 0 }
-        Write-Host '  ║' -ForegroundColor Yellow -NoNewline
-        Write-Host ($visible + (' ' * $pad)) -NoNewline
-        Write-Host '║'   -ForegroundColor Yellow
+        Write-Host '  |' -ForegroundColor Yellow -NoNewline
+        Write-Host ($line + (' ' * $pad)) -NoNewline
+        Write-Host '|'   -ForegroundColor Yellow
     }
     Write-Host $bottom -ForegroundColor Yellow
 }
@@ -155,10 +149,10 @@ if (-not $pyCmd) { $pyCmd = Try-Py -Exe 'python3' -Pre @() }
 if (-not $pyCmd) {
     Write-Fail 'No suitable Python found.'
     Write-Host ''
-    Write-Host '    Install Python 3.10 or newer first:' -ForegroundColor White
-    Write-Host '      https://www.python.org/downloads/windows/' -ForegroundColor Yellow
-    Write-Host '    When the installer runs, tick "Add python.exe to PATH".' -ForegroundColor White
-    Write-Host '    Then re-run this installer.' -ForegroundColor White
+    Write-Host '      Install Python 3.10 or newer first:' -ForegroundColor White
+    Write-Host '        https://www.python.org/downloads/windows/' -ForegroundColor Yellow
+    Write-Host '      When the installer runs, tick "Add python.exe to PATH".' -ForegroundColor White
+    Write-Host '      Then re-run this installer.' -ForegroundColor White
     Write-Host ''
     exit 1
 }
@@ -237,7 +231,7 @@ Write-Ok "$PackageName installed"
 $homeBase = $env:USERPROFILE
 if (-not $homeBase) { $homeBase = $HOME }
 if (-not $homeBase) {
-    Write-Fail 'Could not resolve user home directory ($env:USERPROFILE / $HOME both empty).'
+    Write-Fail 'Could not resolve user home directory.'
     exit 1
 }
 
@@ -275,12 +269,12 @@ if (Get-Command ppd -ErrorAction SilentlyContinue) {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Done — render summary card + next-steps
+# 5. Done -- render summary card + next-steps
 # ---------------------------------------------------------------------------
 
 Write-Host ''
 Write-Card -Lines @(
-    "  PPD Agent v$AppVersion  ·  $Tagline",
+    "  PPD Agent v$AppVersion  --  $Tagline",
     '',
     "  PPD HOME    $ppdHome",
     "  CONFIG      $(Join-Path $ppdHome '.env')",
@@ -288,7 +282,7 @@ Write-Card -Lines @(
     "  PARQUET     $parquetDir",
     "  PLOTS       $plotsDir",
     '',
-    '  5 modules  ·  20 tools  ·  ppd --help for commands'
+    '  5 modules  -  20 tools  -  ppd --help for commands'
 )
 Write-Host ''
 Write-Host '  Installation complete.' -ForegroundColor Green
