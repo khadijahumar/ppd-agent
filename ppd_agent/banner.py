@@ -39,24 +39,25 @@ def app_version() -> str:
         return "?.?.?"
 
 
-# figlet "big" font for "PPD-AGENT", split into a left half ("PPD") in
-# bright yellow and a right half ("-AGENT") in regular yellow so the
-# wordmark has visual hierarchy.
+# figlet "big" font for "PPD-AGENT", split exactly at column 22 of the
+# raw figlet output: left half is the "PPD" wordmark (22 cols), right
+# half is "-AGENT" (41 cols). Two leading spaces of indent. Pure ASCII
+# so the runtime CLI looks the same regardless of console code page.
 _BANNER_LEFT = (
-    "   _____  _____  _____ ",
-    "  |  __ \\|  __ \\|  __ \\",
+    "   _____  _____  _____  ",
+    "  |  __ \\|  __ \\|  __ \\ ",
     "  | |__) | |__) | |  | |",
     "  |  ___/|  ___/| |  | |",
     "  | |    | |    | |__| |",
-    "  |_|    |_|    |_____/",
+    "  |_|    |_|    |_____/ ",
 )
 _BANNER_RIGHT = (
-    "                _____ ______ _   _ _______",
-    "         /\\    / ____|  ____| \\ | |__   __|",
-    " ______ /  \\  | |  __| |__  |  \\| |  | |   ",
-    "|______/ /\\ \\ | | |_ |  __| | . ` |  | |   ",
-    "      / ____ \\| |__| | |____| |\\  |  | |   ",
-    "     /_/    \\_\\_____ |______|_| \\_|  |_|   ",
+    "              _____ ______ _   _ _______ ",
+    "        /\\   / ____|  ____| \\ | |__   __|",
+    "______ /  \\ | |  __| |__  |  \\| |  | |   ",
+    "______/ /\\ \\| | |_ |  __| | . ` |  | |   ",
+    "     / ____ \\ |__| | |____| |\\  |  | |   ",
+    "    /_/    \\_\\_____|______|_| \\_|  |_|   ",
 )
 
 

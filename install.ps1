@@ -36,23 +36,25 @@ $MinPyMinor  = 10
 
 function Write-Banner {
     Write-Host ''
-    # figlet "big" font for "PPD-AGENT". Pure ASCII; renders the same on
-    # every Windows console regardless of code page.
+    # figlet "big" font for "PPD-AGENT", split exactly at column 22 of the
+    # raw figlet output so every left line is 22 chars (PPD) and every
+    # right line is 41 chars (-AGENT). Plus 2 leading spaces of indent.
+    # Pure ASCII -- renders identically on every Windows code page.
     $left = @(
-        '   _____  _____  _____ ',
-        '  |  __ \|  __ \|  __ \',
+        '   _____  _____  _____  ',
+        '  |  __ \|  __ \|  __ \ ',
         '  | |__) | |__) | |  | |',
         '  |  ___/|  ___/| |  | |',
         '  | |    | |    | |__| |',
-        '  |_|    |_|    |_____/'
+        '  |_|    |_|    |_____/ '
     )
     $right = @(
-        '                _____ ______ _   _ _______',
-        '         /\    / ____|  ____| \ | |__   __|',
-        ' ______ /  \  | |  __| |__  |  \| |  | |   ',
-        '|______/ /\ \ | | |_ |  __| | . ` |  | |   ',
-        '      / ____ \| |__| | |____| |\  |  | |   ',
-        '     /_/    \_\_____ |______|_| \_|  |_|   '
+        '              _____ ______ _   _ _______ ',
+        '        /\   / ____|  ____| \ | |__   __|',
+        '______ /  \ | |  __| |__  |  \| |  | |   ',
+        '______/ /\ \| | |_ |  __| | . ` |  | |   ',
+        '     / ____ \ |__| | |____| |\  |  | |   ',
+        '    /_/    \_\_____|______|_| \_|  |_|   '
     )
     for ($i = 0; $i -lt $left.Length; $i++) {
         Write-Host $left[$i]  -ForegroundColor Yellow      -NoNewline
@@ -111,24 +113,48 @@ function Invoke-Py {
 
 # Try one specific Python interpreter. Returns a PSObject {exe, pre, version}
 # if it works AND meets the minimum version, else $null.
+#
+# IMPORTANT: this function used to probe the version with
+#   python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+# but that triggers a well-known Windows PowerShell 5.1 bug where double
+# quotes embedded in a native-command argument get mangled before reaching
+# the child process. Python sees a syntax error, exits != 0, and we
+# wrongly conclude no Python is installed. Using the much simpler
+# `--version` flag avoids any nested quoting and always works.
 function Try-Py {
     param(
         [Parameter(Mandatory)] [string]   $Exe,
         [AllowEmptyCollection()] [string[]] $Pre = @()
     )
-    if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return $null }
-    $verArgs = @() + $Pre + @('-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    $resolved = Get-Command $Exe -ErrorAction SilentlyContinue
+    if (-not $resolved) { return $null }
+
+    # Skip the Microsoft Store "App Execution Alias" stub for python3.exe
+    # (it lives under WindowsApps and just opens the Store page).
+    $src = ''
+    try { $src = $resolved.Source } catch {}
+    if ($src -and ($src -like '*\WindowsApps\*')) {
+        Write-Info "skipping Microsoft Store stub: $src"
+        return $null
+    }
+
+    $verArgs = @() + $Pre + @('--version')
     $raw = $null
-    try { $raw = & $Exe @verArgs 2>$null } catch { return $null }
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
-    $ver = ($raw | Out-String).Trim()
-    if (-not $ver) { return $null }
-    $parts = $ver.Split('.')
-    if ($parts.Length -lt 2) { return $null }
-    [int]$maj = $parts[0]; [int]$min = $parts[1]
+    try { $raw = & $Exe @verArgs 2>&1 } catch { return $null }
+    $text = ($raw | Out-String).Trim()
+    if (-not $text) { return $null }
+
+    # `python --version` prints something like "Python 3.14.0". Extract
+    # the first "<digits>.<digits>" pair anywhere in the output.
+    $m = [regex]::Match($text, '(\d+)\.(\d+)')
+    if (-not $m.Success) { return $null }
+    [int]$maj = $m.Groups[1].Value
+    [int]$min = $m.Groups[2].Value
+    $ver = "$maj.$min"
+
+    if ($Pre.Length -gt 0) { $human = "$Exe $($Pre -join ' ')" } else { $human = $Exe }
     $ok = ($maj -gt $MinPyMajor) -or ($maj -eq $MinPyMajor -and $min -ge $MinPyMinor)
     if (-not $ok) {
-        if ($Pre.Length -gt 0) { $human = "$Exe $($Pre -join ' ')" } else { $human = $Exe }
         Write-Warn2 "${human}: Python $ver  (need >= $MinPyMajor.$MinPyMinor)"
         return $null
     }
@@ -164,6 +190,9 @@ Write-Ok "$pyHuman  (Python $($pyCmd.version))"
 # console_scripts go) so we can prepend it to PATH for the rest of this
 # session. sysconfig's 'nt_user' scheme returns the correct version-specific
 # path (e.g. "%APPDATA%\Python\Python314\Scripts") on Windows.
+# Note: the script we pass to `-c` deliberately uses only single quotes
+# inside, so PowerShell 5.1 never has to escape any embedded double
+# quotes. (See Try-Py for the long-winded explanation of why that matters.)
 $scriptsArgs = @() + $pyCmd.pre + @('-c', "import sysconfig; print(sysconfig.get_path('scripts', scheme='nt_user'))")
 $userScripts = $null
 try { $userScripts = & $pyCmd.exe @scriptsArgs 2>$null } catch {}
