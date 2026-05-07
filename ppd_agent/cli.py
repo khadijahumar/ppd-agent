@@ -23,6 +23,16 @@ from pathlib import Path
 
 import click
 
+from ppd_agent.banner import (
+    print_banner,
+    print_card,
+    print_fail,
+    print_info,
+    print_ok,
+    print_step,
+    print_warn,
+)
+
 # NOTE: we import ppd_agent.config lazily inside commands. Importing it at
 # module load time would trigger ``CONFIG.ensure_dirs()`` and resolve paths
 # before the user has had a chance to set ``PPD_HOME``.
@@ -116,19 +126,19 @@ def _write_env_file(path: Path, values: dict[str, str], comment_header: str | No
 
 
 def _ok(msg: str) -> None:
-    click.secho(f"  OK    {msg}", fg="green")
+    print_ok(msg)
 
 
 def _warn(msg: str) -> None:
-    click.secho(f"  WARN  {msg}", fg="yellow")
+    print_warn(msg)
 
 
 def _err(msg: str) -> None:
-    click.secho(f"  FAIL  {msg}", fg="red")
+    print_fail(msg)
 
 
 def _info(msg: str) -> None:
-    click.echo(f"  ..    {msg}")
+    print_info(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +178,22 @@ def init(non_interactive: bool) -> None:
     (home / "data" / "parquet").mkdir(parents=True, exist_ok=True)
     (home / "data" / "plots").mkdir(parents=True, exist_ok=True)
 
-    click.echo(f"PPD home : {home}")
-    click.echo(f"Env file : {env_path}")
-    click.echo()
+    if not non_interactive:
+        print_banner()
+        print_card([
+            f"  PPD HOME    {home}",
+            f"  CONFIG      {env_path}",
+            "",
+            "  Setup wizard — you'll be asked for:",
+            "   · OpenRouter API key   (https://openrouter.ai/keys)",
+            "   · Telegram bot token   (from @BotFather)",
+            "   · Telegram user IDs    (whitelist; from @userinfobot)",
+        ])
+        click.echo()
+    else:
+        click.echo(f"PPD home : {home}")
+        click.echo(f"Env file : {env_path}")
+        click.echo()
 
     existing = _read_env_file(env_path)
     if existing and not non_interactive:
@@ -231,12 +254,16 @@ def init(non_interactive: bool) -> None:
         ),
     )
     click.echo()
-    click.echo(f"Saved {env_path}")
+    print_ok(f"Saved {env_path}")
     click.echo()
-    click.echo("Next steps:")
-    click.echo(f"  1. Drop your 8 .xlsx files into  {home / 'data' / 'raw'}")
-    click.echo("  2. Run:  ppd prepare-data")
-    click.echo("  3. Run:  ppd start")
+    print_card([
+        "  Next steps:",
+        "",
+        f"  1. Drop your 8 .xlsx files into:",
+        f"     {home / 'data' / 'raw'}",
+        "  2. ppd prepare-data    (one-time, ~2 minutes)",
+        "  3. ppd start           (launches the Telegram bot)",
+    ])
 
 
 # -- prepare-data ------------------------------------------------------------
@@ -301,10 +328,15 @@ def doctor() -> None:
     """Check the installation: paths, env, deps, parquet data."""
     home = _home()
     env_path = _env_path()
-    click.echo("=== PPD doctor ===")
-    click.echo(f"PPD home : {home}")
-    click.echo(f"Env file : {env_path}")
+    print_banner()
+    print_card([
+        f"  PPD HOME    {home}",
+        f"  CONFIG      {env_path}",
+        f"  DATA RAW    {home / 'data' / 'raw'}",
+        f"  PARQUET     {home / 'data' / 'parquet'}",
+    ])
     click.echo()
+    print_step("Diagnosing your install")
 
     if home.is_dir():
         _ok(f"home dir exists: {home}")
@@ -370,7 +402,7 @@ def doctor() -> None:
         _err("dep: pyarrow missing")
 
     click.echo()
-    click.echo("Doctor finished.")
+    print_step("Doctor finished.")
 
 
 # -- config ------------------------------------------------------------------
