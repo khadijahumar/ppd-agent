@@ -91,8 +91,11 @@ Telegram
 Open **PowerShell** and paste:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/khadijahumar/ppd-agent/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/khadijahumar/ppd-agent/HEAD/install.ps1 | iex
 ```
+
+(The `HEAD` segment auto-resolves to whichever branch is currently the default
+on GitHub, so this URL keeps working even if the default branch is renamed.)
 
 The installer will:
 
@@ -194,7 +197,7 @@ and the bot replies with text + plots.
 Re-run the installer; pipx will reinstall the latest from GitHub:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/khadijahumar/ppd-agent/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/khadijahumar/ppd-agent/HEAD/install.ps1 | iex
 ```
 
 Or directly:

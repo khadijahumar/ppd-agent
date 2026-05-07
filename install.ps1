@@ -1,7 +1,7 @@
 # PPD Assistant - Windows installer
 #
-# One-liner install:
-#   iwr -useb https://raw.githubusercontent.com/khadijahumar/ppd-agent/main/install.ps1 | iex
+# One-liner install (works regardless of which branch is the GitHub default):
+#   iwr -useb https://raw.githubusercontent.com/khadijahumar/ppd-agent/HEAD/install.ps1 | iex
 #
 # What it does:
 #   1. Verifies Python >= 3.10 is on PATH (or via the 'py' launcher).
@@ -124,7 +124,7 @@ if (-not (Test-Pipx)) {
     Write-Fail 'pipx still not found after install.'
     Write-Host ''
     Write-Host 'Open a NEW PowerShell window (so PATH is reloaded) and re-run:'
-    Write-Host '  iwr -useb https://raw.githubusercontent.com/khadijahumar/ppd-agent/main/install.ps1 | iex'
+    Write-Host '  iwr -useb https://raw.githubusercontent.com/khadijahumar/ppd-agent/HEAD/install.ps1 | iex'
     exit 1
 }
 
