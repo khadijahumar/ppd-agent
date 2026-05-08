@@ -553,10 +553,24 @@ def uninstall() -> None:
     pipx_cmd = _find_pipx_cmd()
     if pipx_cmd:
         try:
-            subprocess.check_call(pipx_cmd + ["uninstall", "ppd-agent"])
-            print_ok("Aplikasi PPD Agent berhasil dihapus dari sistem (pipx).")
-        except subprocess.CalledProcessError:
-            print_warn("Gagal menghapus via pipx. Mungkin PPD Agent tidak diinstall via pipx.")
+            # On Windows, we cannot delete the running binary (ppd.exe).
+            # We spawn a detached process that waits 2 seconds for this process to exit.
+            if os.name == "nt":
+                import subprocess
+                cmd_str = " ".join(pipx_cmd + ["uninstall", "ppd-agent"])
+                # We use 'start' via shell to detach, or Start-Process in powershell
+                ps_cmd = f"Start-Sleep -s 2; {cmd_str}"
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS if hasattr(subprocess, 'DETACHED_PROCESS') else 0
+                )
+                print_ok("Uninstall telah dijadwalkan. Aplikasi akan terhapus otomatis dalam 2 detik.")
+            else:
+                subprocess.check_call(pipx_cmd + ["uninstall", "ppd-agent"])
+                print_ok("Aplikasi PPD Agent berhasil dihapus dari sistem (pipx).")
+        except Exception as e:
+            print_warn(f"Gagal menjadwalkan uninstall: {e}")
+            print_info("Silakan jalankan manual: pipx uninstall ppd-agent")
     else:
         print_warn("pipx tidak ditemukan. Lewati uninstall package — hanya hapus data.")
 
@@ -568,7 +582,7 @@ def uninstall() -> None:
         except Exception as e:
             print_fail(f"Gagal menghapus folder {home}: {e}")
 
-    print_ok("Uninstall selesai.")
+    print_ok("Selesai.")
 
 
 @cli.command("model")
