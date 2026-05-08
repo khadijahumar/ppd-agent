@@ -456,34 +456,78 @@ def config_set(key: str, value: str) -> None:
 # -- new commands ------------------------------------------------------------
 
 
+def _find_pipx_cmd() -> list[str]:
+    """Find a working pipx command.
+
+    When running inside a pipx-managed venv, ``sys.executable`` points at
+    the *venv* Python which does NOT have pipx installed.  We need the
+    *system* Python (or the ``pipx`` executable directly on PATH).
+    """
+    # 1. Try the pipx binary directly on PATH
+    pipx_exe = shutil.which("pipx")
+    if pipx_exe:
+        return [pipx_exe]
+
+    # 2. Try common system Python interpreters with -m pipx
+    for candidate in ("py", "python", "python3"):
+        exe = shutil.which(candidate)
+        if not exe:
+            continue
+        # Skip the venv python (that's us)
+        try:
+            if Path(exe).resolve() == Path(sys.executable).resolve():
+                continue
+        except OSError:
+            pass
+        return [exe, "-m", "pipx"]
+
+    # 3. Last resort: try py -3 (Windows launcher)
+    py_exe = shutil.which("py")
+    if py_exe:
+        return [py_exe, "-3", "-m", "pipx"]
+
+    return []
+
+
 @cli.command()
 def update() -> None:
     """Update PPD Agent to the latest version from GitHub."""
     import subprocess
+
+    pipx_cmd = _find_pipx_cmd()
+    if not pipx_cmd:
+        print_fail("pipx tidak ditemukan di sistem. Install dulu: python -m pip install --user pipx")
+        return
+
     click.echo("Mengambil pembaruan terbaru dari GitHub...")
+    cmd = pipx_cmd + ["install", "--force", "git+https://github.com/khadijahumar/ppd-agent.git"]
+    print_info(f"Menjalankan: {' '.join(cmd)}")
     try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pipx", "install", "--force", "git+https://github.com/khadijahumar/ppd-agent.git"]
-        )
+        subprocess.check_call(cmd)
         print_ok("PPD Agent berhasil diupdate! Silakan jalankan 'ppd start' kembali.")
     except subprocess.CalledProcessError:
-        print_fail("Gagal mengupdate PPD Agent. Pastikan internet Anda lancar dan pipx terinstall.")
+        print_fail("Gagal mengupdate PPD Agent. Pastikan internet Anda lancar.")
 
 
 @cli.command()
 def uninstall() -> None:
     """Uninstall PPD Agent completely."""
     import subprocess
+
     if not click.confirm("Apakah Anda yakin ingin MENGHAPUS PPD Agent dari komputer ini?", default=False):
         click.echo("Dibatalkan.")
         return
-        
-    try:
-        subprocess.check_call([sys.executable, "-m", "pipx", "uninstall", "ppd-agent"])
-        print_ok("Aplikasi PPD Agent berhasil dihapus dari sistem (pipx).")
-    except subprocess.CalledProcessError:
-        print_warn("Gagal menghapus via pipx. Mungkin PPD Agent tidak diinstall via pipx.")
-    
+
+    pipx_cmd = _find_pipx_cmd()
+    if pipx_cmd:
+        try:
+            subprocess.check_call(pipx_cmd + ["uninstall", "ppd-agent"])
+            print_ok("Aplikasi PPD Agent berhasil dihapus dari sistem (pipx).")
+        except subprocess.CalledProcessError:
+            print_warn("Gagal menghapus via pipx. Mungkin PPD Agent tidak diinstall via pipx.")
+    else:
+        print_warn("pipx tidak ditemukan. Lewati uninstall package — hanya hapus data.")
+
     home = _home()
     if click.confirm(f"Apakah Anda juga ingin MENGHAPUS semua data dan konfigurasi di {home}?", default=False):
         try:
@@ -491,35 +535,65 @@ def uninstall() -> None:
             print_ok(f"Folder {home} beserta isinya berhasil dihapus.")
         except Exception as e:
             print_fail(f"Gagal menghapus folder {home}: {e}")
-    
+
     print_ok("Uninstall selesai.")
 
 
-@cli.command("custom-model")
-def custom_model() -> None:
-    """Setup a custom LLM provider interactively."""
-    click.echo("=== Setup Custom LLM Provider ===")
-    click.echo("Anda bisa memasukkan endpoint OpenAI-compatible dari provider manapun (misal: Hermes, Ollama, LMStudio, dll).")
-    
-    base_url = click.prompt("1. Masukkan Base URL (contoh: https://api.hermes.com/v1)", type=str).strip()
-    api_key = click.prompt("2. Masukkan API Key (tekan enter jika kosong)", default="", show_default=False).strip()
-    model_name = click.prompt("3. Masukkan Nama Model", type=str).strip()
-    
+@cli.command("model")
+def model_cmd() -> None:
+    """View or change the LLM model/provider interactively."""
     env_path = _env_path()
     data = _read_env_file(env_path)
-    
-    data["LLM_PROVIDER"] = "custom"
-    data["LLM_BASE_URL"] = base_url
-    data["LLM_API_KEY"] = api_key
-    data["PPD_MODEL"] = model_name
-    
+
+    current_provider = data.get("LLM_PROVIDER", "openrouter")
+    current_model = data.get("PPD_MODEL", data.get("OPENROUTER_API_KEY", "(belum diset)"))
+
+    click.echo(f"Model saat ini  : {data.get('PPD_MODEL', '(default)')}")
+    click.echo(f"Provider        : {current_provider}")
+    if data.get("LLM_BASE_URL"):
+        click.echo(f"Base URL        : {data['LLM_BASE_URL']}")
+    click.echo()
+
+    choices = [
+        ("1", "openrouter",  "OpenRouter  (default, multi-model)"),
+        ("2", "openai",      "OpenAI      (GPT-4o, dll)"),
+        ("3", "google",      "Google      (Gemini)"),
+        ("4", "deepseek",    "DeepSeek"),
+        ("5", "groq",        "Groq        (Llama, dll)"),
+        ("6", "custom",      "Custom URL  (Hermes, Ollama, LMStudio, dll)"),
+    ]
+    click.echo("Pilih provider:")
+    for num, _, label in choices:
+        click.echo(f"  {num}. {label}")
+    click.echo()
+
+    choice = click.prompt("Pilihan (1-6)", type=click.IntRange(1, 6))
+    _, provider_key, provider_label = choices[choice - 1]
+
+    data["LLM_PROVIDER"] = provider_key
+
+    if provider_key == "custom":
+        data["LLM_BASE_URL"] = click.prompt("Base URL (contoh: https://api.hermes.com/v1)").strip()
+        data["LLM_API_KEY"] = click.prompt("API Key (tekan enter jika kosong)", default="", show_default=False).strip()
+        data["PPD_MODEL"] = click.prompt("Nama Model").strip()
+    else:
+        api_key = click.prompt(f"API Key untuk {provider_label}", default=data.get("LLM_API_KEY", ""), show_default=False).strip()
+        if api_key:
+            data["LLM_API_KEY"] = api_key
+        model_name = click.prompt("Nama Model (kosongkan untuk default)", default=data.get("PPD_MODEL", ""), show_default=True).strip()
+        if model_name:
+            data["PPD_MODEL"] = model_name
+
     _write_env_file(env_path, data, comment_header="PPD Assistant configuration.")
     click.echo()
-    print_ok("Konfigurasi Custom LLM berhasil disimpan!")
-    print_info(f"  Provider  : custom")
-    print_info(f"  Base URL  : {base_url}")
-    print_info(f"  Model     : {model_name}")
-    print_info(f"Konfigurasi telah disimpan di {env_path}")
+    print_ok("Konfigurasi model berhasil disimpan!")
+    print_info(f"  Provider : {provider_key}")
+    print_info(f"  Model    : {data.get('PPD_MODEL', '(default)')}")
+    if data.get("LLM_BASE_URL"):
+        print_info(f"  Base URL : {data['LLM_BASE_URL']}")
+    print_info(f"Tersimpan di {env_path}")
+    click.echo()
+    print_info("Jalankan 'ppd start' untuk menggunakan model baru.")
 
 
 # -- entry point -------------------------------------------------------------
