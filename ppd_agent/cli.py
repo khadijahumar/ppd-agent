@@ -148,6 +148,7 @@ def _info(msg: str) -> None:
 
 @click.group(
     name="ppd",
+    invoke_without_command=True,
     help=(
         "PPD Assistant - AI agent for steel manufacturing.\n"
         "\n"
@@ -156,8 +157,25 @@ def _info(msg: str) -> None:
     ),
 )
 @click.version_option(package_name="ppd-agent", message="%(prog)s %(version)s")
-def cli() -> None:
-    pass
+@click.pass_context
+def cli(ctx: click.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+@cli.command("help")
+@click.argument("command", required=False)
+@click.pass_context
+def help_cmd(ctx: click.Context, command: str | None) -> None:
+    """Show help for a command."""
+    if command:
+        cmd = cli.get_command(ctx, command)
+        if cmd:
+            click.echo(cmd.get_help(ctx))
+        else:
+            click.echo(f"Error: tidak ada perintah '{command}'. Ketik 'ppd help' untuk daftar.")
+    else:
+        click.echo(ctx.parent.get_help())
 
 
 # -- init --------------------------------------------------------------------
@@ -500,11 +518,25 @@ def update() -> None:
         return
 
     click.echo("Mengambil pembaruan terbaru dari GitHub...")
-    cmd = pipx_cmd + ["install", "--force", "git+https://github.com/khadijahumar/ppd-agent.git"]
-    print_info(f"Menjalankan: {' '.join(cmd)}")
+
+    # Step 1: uninstall dulu (menghindari konflik venv uv)
+    print_info("Menghapus versi lama...")
+    try:
+        subprocess.run(
+            pipx_cmd + ["uninstall", "ppd-agent"],
+            capture_output=True,
+        )
+    except Exception:
+        pass  # Tidak apa-apa kalau gagal (mungkin belum terinstall)
+
+    # Step 2: install fresh dari GitHub
+    cmd = pipx_cmd + ["install", "git+https://github.com/khadijahumar/ppd-agent.git"]
+    print_info(f"Menginstall versi terbaru...")
     try:
         subprocess.check_call(cmd)
-        print_ok("PPD Agent berhasil diupdate! Silakan jalankan 'ppd start' kembali.")
+        click.echo()
+        print_ok("PPD Agent berhasil diupdate!")
+        print_info("Silakan buka terminal BARU, lalu jalankan 'ppd start'.")
     except subprocess.CalledProcessError:
         print_fail("Gagal mengupdate PPD Agent. Pastikan internet Anda lancar.")
 
