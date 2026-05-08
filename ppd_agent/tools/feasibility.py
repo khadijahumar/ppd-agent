@@ -642,8 +642,8 @@ def _fmt_pair(lo: float | None, hi: float | None, decimals: int = 4,
 
 def _format_history_block_v2(hs: HistoryStats) -> str:
     """New emoji-based historical data block."""
-    lines = ["2\ufe0f\u20e3 HISTORICAL DATA"]
-    lines.append(f"   Records: {hs.mech_n:,}")
+    lines = ["2\ufe0f\u20e3 DATA HISTORIS (2021)"]
+    lines.append(f"   Jumlah Record: {hs.mech_n:,}")
 
     def _range_line(label: str, lo: float | None, hi: float | None,
                     avg: float | None, unit: str,
@@ -675,8 +675,8 @@ def _format_deboer_block(mech_rep: MechReport | None, combos: list[ParamCombo] |
     compat = sum(1 for r in mech_rep.rows if r.verdict == "PASS")
     pct = round(100.0 * compat / total, 0) if total > 0 else 0
 
-    lines = ["3\ufe0f\u20e3 DEBOER PREDICTION"]
-    lines.append(f"   Compatible: {compat}/{total} ({pct:.0f}%)")
+    lines = ["3\ufe0f\u20e3 PREDIKSI DEBOER"]
+    lines.append(f"   Kompatibel: {compat}/{total} ({pct:.0f}%)")
     
     # Extract YS and TS for the inline string
     ys_pred, ts_pred = "n/a", "n/a"
@@ -695,7 +695,7 @@ def _format_deboer_block(mech_rep: MechReport | None, combos: list[ParamCombo] |
             ts_pred = pred_str
 
     lines.append(
-        f"   Best: FT={mech_rep.ft.target}\u00b0C, "
+        f"   Terbaik: FT={mech_rep.ft.target}\u00b0C, "
         f"CT={mech_rep.ct.target}\u00b0C \u2192 YS={ys_pred}, TS={ts_pred}"
     )
 
@@ -711,8 +711,8 @@ def _format_deboer_block(mech_rep: MechReport | None, combos: list[ParamCombo] |
 
 def _format_chem_block(rep: ChemReport, chem_n: int = 0) -> str:
     emoji = "\u2705" if rep.verdict == "PASS" else "\u274c"
-    status = "Compatible" if rep.verdict == "PASS" else "Not Compatible"
-    head = f"1\ufe0f\u20e3 CHEMICAL\n   {emoji} {status}"
+    status = "Kompatibel" if rep.verdict == "PASS" else "Tidak Kompatibel"
+    head = f"1\ufe0f\u20e3 KIMIA (CHEMICAL)\n   {emoji} {status}"
     if chem_n > 0:
         head += f" ({chem_n} samples)"
 
@@ -947,7 +947,9 @@ def find_compatible_grades(specification: str, top_n: int = 10) -> str:
 
     if not pass_grades:
         return (
-            f"COMPATIBLE GRADES FOR {spec}\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"GRADE KOMPATIBEL UNTUK {spec}\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
             f"  Tidak ada grade yang lulus full chemical compatibility."
         )
 
@@ -958,8 +960,6 @@ def find_compatible_grades(specification: str, top_n: int = 10) -> str:
         vc = spec_prod["Grade"].astype(str).value_counts()
         used_counts = {str(g): int(c) for g, c in vc.items()}
 
-    # Re-rank: historical pairings first (by count desc), then unproduced grades
-    # by element-match count.
     pass_set = {g for g, _ in pass_grades}
     history_rows = sorted(
         [(g, c) for g, c in used_counts.items() if g in pass_set],
@@ -972,25 +972,27 @@ def find_compatible_grades(specification: str, top_n: int = 10) -> str:
 
     rows: list[list[object]] = []
     for grade_id, count in history_rows[:top_n]:
-        rows.append([grade_id, "PASS", f"{count:,} coils"])
+        rows.append([grade_id, "\u2705 PASS", f"{count:,} coil"])
     n_left = max(0, top_n - len(rows))
     for grade_id in unused_rows[:n_left]:
-        rows.append([grade_id, "PASS", "never produced"])
+        rows.append([grade_id, "\u2705 PASS", "belum pernah"])
 
     table = fmt.fixed_table(
-        ["Steel Grade", "Chem", "History (2021)"],
+        ["Steel Grade", "Kimia", "Histori 2021"],
         rows,
     )
     summary_lines = [
-        f"COMPATIBLE GRADES FOR {spec}",
-        f"  Total grades passing chem compatibility: {len(pass_grades)}",
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+        f"GRADE KOMPATIBEL UNTUK {spec}",
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+        f"\u2022 Total grade lulus kompatibilitas kimia: {len(pass_grades)}",
     ]
     if history_rows:
         summary_lines.append(
-            f"  Of those, {len(history_rows)} have actual 2021 production for this spec."
+            f"\u2022 Dari jumlah itu, {len(history_rows)} grade sudah pernah diproduksi untuk spec ini."
         )
     summary_lines.append(
-        f"  (showing top {len(rows)}: produced grades first, then unproduced candidates)"
+        f"\u2022 (Menampilkan top {len(rows)}: histori terbanyak didahulukan)"
     )
     return "\n".join(summary_lines) + "\n\n" + table
 
@@ -1049,20 +1051,22 @@ def compare_grades(grade_a: str, grade_b: str) -> str:
             continue
         rows.append([label, _fmt_pair(a_lo, a_hi), _fmt_pair(b_lo, b_hi)])
 
-    table = fmt.fixed_table(["Element", a, b], rows)
+    table = fmt.fixed_table(["Elemen", a, b], rows)
 
     df_prod = load_produksi_hrc()
     n_a = int((df_prod["Grade"].astype(str) == a).sum())
     n_b = int((df_prod["Grade"].astype(str) == b).sum())
 
     history = (
-        "Production history (2021):\n"
-        f"  - Grade {a}: {n_a:,} coils\n"
-        f"  - Grade {b}: {n_b:,} coils"
+        "HISTORI PRODUKSI (2021):\n"
+        f"  \u2022 Grade {a}: {n_a:,} coil\n"
+        f"  \u2022 Grade {b}: {n_b:,} coil"
     )
 
     return fmt.join_blocks(
-        f"COMPARE GRADES — {a} vs {b}",
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        f"PERBANDINGAN GRADE: {a} vs {b}\n"
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
         table,
         history,
     )
