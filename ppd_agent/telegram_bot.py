@@ -4,11 +4,17 @@
 - Text messages → agent.chat → reply text + plot images.
 - Multi-user whitelist via TELEGRAM_ALLOWED_USER_IDS in .env.
 - Long responses are chunked to fit Telegram's 4096 char message limit.
+- Rate limiting per user to prevent cost explosion.
+- Plot files are cleaned up after sending.
+- agent.chat runs in a thread so the async event loop is never blocked.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import textwrap
+import time
+from collections import defaultdict
 from pathlib import Path
 
 from telegram import Update
@@ -22,27 +28,51 @@ from telegram.ext import (
 
 from .agent import PPDAgent
 from .config import CONFIG
-from .data_loader import warmup
+from .data_loader import production_years, warmup
 
 log = logging.getLogger(__name__)
 
 TG_TEXT_LIMIT = 4000  # leave a bit of headroom under 4096
 
+# Per-user rate limiter: {user_id: [timestamp, ...]}
+_user_timestamps: dict[int, list[float]] = defaultdict(list)
 
-WELCOME = (
-    "Halo! Saya **PPD Assistant** — agen AI untuk steel manufacturing.\n\n"
-    "**Skill saya:**\n"
-    "1. Product Design lookup (steel grade, chem/mech/elongation/thickness/FT-CT standards)\n"
-    "2. HRC Production Analysis (filter, statistik, histogram, scatter, heatmap, lookup coil)\n"
-    "3. Deboer Property Prediction (YS/TS/CE/PCM/Tnr/Ar3/Liq dari steel grade)\n"
-    "4. Compliance Check (cek apakah satu coil lulus standar tertentu)\n\n"
-    "Contoh pertanyaan:\n"
-    "  • _Coil ASC111 lulus standar EN 10025 S275JR nggak?_\n"
-    "  • _Histogram YS untuk spec MS EN 10025-2:2011 S275JR+AR_\n"
-    "  • _Cari steel grade untuk KI-A36 tebal 8mm_\n"
-    "  • _Prediksi Deboer untuk grade 0A1810 tebal 8mm, FT 860, CT 590_\n\n"
-    "Perintah: /reset (reset percakapan), /myid (lihat user ID kamu), /help"
-)
+
+def _check_rate_limit(user_id: int) -> bool:
+    """Return True if the user is within the rate limit."""
+    now = time.monotonic()
+    window = CONFIG.rate_limit_window_seconds
+    limit = CONFIG.rate_limit_per_user
+
+    ts = _user_timestamps[user_id]
+    ts[:] = [t for t in ts if now - t < window]
+    if len(ts) >= limit:
+        return False
+    ts.append(now)
+    return True
+
+
+def _build_welcome() -> str:
+    years = production_years()
+    year_str = ", ".join(years) if years and years != ["unknown"] else "2021"
+    return (
+        "Halo! Saya **PPD Assistant** — agen AI untuk steel manufacturing.\n\n"
+        "**Skill saya:**\n"
+        "1. Product Design lookup (steel grade, chem/mech/elongation/thickness/FT-CT standards)\n"
+        "2. HRC Production Analysis (filter, statistik, histogram, scatter, heatmap, lookup coil)\n"
+        "3. Deboer Property Prediction (YS/TS/CE/PCM/Tnr/Ar3/Liq dari steel grade)\n"
+        "4. Compliance Check (cek apakah satu coil lulus standar tertentu)\n"
+        "5. Feasibility Analysis (bisakah Grade X memenuhi Spec Y? + saran FT/CT optimal)\n\n"
+        f"Data produksi: {year_str}\n\n"
+        "Contoh pertanyaan:\n"
+        "  • _Coil ASC111 lulus standar EN 10025 S275JR nggak?_\n"
+        "  • _Histogram YS untuk spec MS EN 10025-2:2011 S275JR+AR_\n"
+        "  • _Cari steel grade untuk KI-A36 tebal 8mm_\n"
+        "  • _Prediksi Deboer untuk grade 0A1810 tebal 8mm, FT 860, CT 590_\n"
+        "  • _A2010 bisa untuk SS400?_\n"
+        "  • _Saran FT/CT untuk A2010 supaya masuk SS400?_\n\n"
+        "Perintah: /reset (reset percakapan), /myid (lihat user ID kamu), /help"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -79,11 +109,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode="Markdown",
         )
         return
-    await update.message.reply_text(WELCOME, parse_mode="Markdown")
+    await update.message.reply_text(_build_welcome(), parse_mode="Markdown")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(WELCOME, parse_mode="Markdown")
+    await update.message.reply_text(_build_welcome(), parse_mode="Markdown")
 
 
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -105,6 +135,23 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if "agent" in context.chat_data:
         context.chat_data["agent"].reset()
     await update.message.reply_text("Percakapan di-reset. Mulai dari awal lagi.")
+
+
+async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user is None or not _is_allowed(user.id):
+        return
+    
+    args = context.args
+    if not args:
+        agent = _agent_for_chat(context)
+        await update.message.reply_text(f"Model saat ini: `{agent.model}`\n\nGunakan: `/model <nama_model>` untuk mengganti.", parse_mode="Markdown")
+        return
+        
+    new_model = args[0]
+    agent = _agent_for_chat(context)
+    agent.model = new_model
+    await update.message.reply_text(f"Model berhasil diubah ke: `{new_model}`", parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -142,12 +189,20 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     log.info("[user=%s] %s", user.id, user_text[:200])
 
+    # rate limiting
+    if not _check_rate_limit(user.id):
+        await update.message.reply_text(
+            f"Rate limit tercapai ({CONFIG.rate_limit_per_user} pesan per "
+            f"{CONFIG.rate_limit_window_seconds} detik). Tunggu sebentar."
+        )
+        return
+
     # show typing while LLM thinks
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     agent = _agent_for_chat(context)
     try:
-        turn = agent.chat(user_text)
+        turn = await asyncio.to_thread(agent.chat, user_text)
     except Exception as exc:
         log.exception("agent.chat failed")
         await update.message.reply_text(f"Maaf, ada error internal: {exc}")
@@ -168,6 +223,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as exc:
             log.exception("send_photo failed for %s", img_path)
             await update.message.reply_text(f"(gagal kirim gambar {Path(img_path).name}: {exc})")
+        finally:
+            try:
+                Path(img_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # send text (chunked)
     text = turn.text or "(empty response)"
@@ -194,6 +254,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("new", cmd_reset))
+    app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     return app
 

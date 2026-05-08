@@ -17,8 +17,7 @@ Verdict is binary: **FEASIBLE** or **NOT FEASIBLE**.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -36,8 +35,11 @@ from ..data_loader import (
     load_hr_elongation_std,
     load_hr_mech_std,
     load_produksi_hrc,
+    production_years,
 )
 from ..ft_ct_codes import CT_CODES, FT_CODES, TempCode, list_ct_codes, list_ft_codes
+from ..parsing import fmt_number
+from .data_quality import filter_chemical, filter_mechanical
 from .deboer import DEBOER_ELEMENTS, _design_pair, deboer_calculate
 
 # ---------------------------------------------------------------------------
@@ -70,7 +72,10 @@ _CHEM_ELEMENT_MAP: list[tuple[str, str, str]] = [
 _DEFAULT_THICKNESS_SWEEP_MM = [3.0, 4.5, 6.0, 8.0, 10.0, 12.5, 16.0, 20.0]
 
 # Sentinel: a value at or above this is treated as "no constraint".
-_STD_SENTINEL = 5.0
+# Chemical composition percentages use 5.0; mechanical properties (MPa, %)
+# use 999.0 since their real values are much larger.
+_CHEM_SENTINEL = 5.0
+_MECH_SENTINEL = 999.0
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +96,7 @@ class ElementCheck:
 
 @dataclass
 class MechCheck:
-    property: str
+    prop_name: str
     predicted_min: float | None
     predicted_max: float | None
     std_min: float | None
@@ -175,7 +180,7 @@ def _resolve_spec_or_message(query: str) -> tuple[str | None, str]:
 # ---------------------------------------------------------------------------
 
 
-def _spec_chem_row(spec: str) -> Optional[pd.Series]:
+def _spec_chem_row(spec: str) -> pd.Series | None:
     df = load_hr_chem_std()
     sub = df[df["Specification"].astype(str) == spec]
     if sub.empty:
@@ -194,13 +199,13 @@ def _val_or_none(row: pd.Series, col: str) -> float | None:
 
 def _is_unbounded_std(low: float | None, high: float | None) -> tuple[bool, bool]:
     lo_unb = low is None or low == 0.0
-    hi_unb = high is None or (high is not None and high >= _STD_SENTINEL)
+    hi_unb = high is None or (high is not None and high >= _CHEM_SENTINEL)
     return lo_unb, hi_unb
 
 
 def _design_unbounded(low: float | None, high: float | None) -> bool:
     lo_zero = low is None or low == 0.0
-    hi_zero_or_sentinel = high is None or high == 0.0 or high >= _STD_SENTINEL
+    hi_zero_or_sentinel = high is None or high == 0.0 or high >= _CHEM_SENTINEL
     return lo_zero and hi_zero_or_sentinel
 
 
@@ -327,7 +332,7 @@ def _check_mech_property(
     fail_lower = std_lo is not None and pred_lo is not None and pred_lo < std_lo
     fail_upper = std_hi is not None and pred_hi is not None and pred_hi > std_hi
     if fail_lower or fail_upper:
-        why = []
+        why: list[str] = []
         if fail_lower:
             why.append(f"predicted min {pred_lo:.1f} < std min {std_lo:.1f}")
         if fail_upper:
@@ -380,7 +385,7 @@ def _build_mech_report(
 
     spec_row = _spec_mech_row(spec, thickness_mm)
 
-    def _spec_val(col: str, sentinel: float = 999.0) -> float | None:
+    def _spec_val(col: str, sentinel: float = _MECH_SENTINEL) -> float | None:
         if spec_row is None:
             return None
         v = spec_row.get(col)
@@ -427,7 +432,78 @@ def _build_mech_report(
 # ---------------------------------------------------------------------------
 
 
-def _history_stats(grade: str, spec: str) -> tuple[int, int, int, list[tuple[str, int]], list[tuple[str, int]]]:
+# ---------------------------------------------------------------------------
+# data class for enriched history stats
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HistoryStats:
+    n_grade: int
+    n_spec: int
+    n_pair: int
+    top_grades_for_spec: list[tuple[str, int]]
+    top_specs_for_grade: list[tuple[str, int]]
+    # mechanical stats (after quality filter)
+    mech_n: int = 0
+    thickness_min: float | None = None
+    thickness_max: float | None = None
+    thickness_avg: float | None = None
+    ft_min: float | None = None
+    ft_max: float | None = None
+    ft_avg: float | None = None
+    ct_min: float | None = None
+    ct_max: float | None = None
+    ct_avg: float | None = None
+    ys_min: float | None = None
+    ys_max: float | None = None
+    ys_out_pct: float | None = None
+    ts_min: float | None = None
+    ts_max: float | None = None
+    ts_out_pct: float | None = None
+    elo_min: float | None = None
+    elo_max: float | None = None
+    elo_out_pct: float | None = None
+    # chemical stats (after quality filter)
+    chem_n: int = 0
+
+
+def _stat_or_none(series: pd.Series, fn: str) -> float | None:
+    if series.empty:
+        return None
+    _FN_MAP = {"min": series.min, "max": series.max, "mean": series.mean}
+    calc = _FN_MAP.get(fn)
+    if calc is None:
+        return None
+    val = calc()
+    if pd.isna(val):
+        return None
+    return float(val)
+
+
+def _pct_out_of_spec(
+    series: pd.Series,
+    std_min: float | None,
+    std_max: float | None,
+) -> float | None:
+    """Percentage of values outside [std_min, std_max]."""
+    valid = series.dropna()
+    if valid.empty or (std_min is None and std_max is None):
+        return None
+    out = 0
+    if std_min is not None:
+        out += int((valid < std_min).sum())
+    if std_max is not None:
+        out += int((valid > std_max).sum())
+    return round(100.0 * out / len(valid), 1)
+
+
+def _history_stats(
+    grade: str, spec: str,
+    spec_ys_min: float | None = None, spec_ys_max: float | None = None,
+    spec_ts_min: float | None = None, spec_ts_max: float | None = None,
+    spec_elo_min: float | None = None, spec_elo_max: float | None = None,
+) -> HistoryStats:
     df = load_produksi_hrc()
     by_grade = df[df["Grade"].astype(str) == grade]
     by_spec = df[df["Spec Code"].astype(str) == spec]
@@ -443,7 +519,56 @@ def _history_stats(grade: str, spec: str) -> tuple[int, int, int, list[tuple[str
         vc = by_grade["Spec Code"].astype(str).value_counts().head(5)
         top_specs_for_grade = [(str(s), int(c)) for s, c in vc.items()]
 
-    return len(by_grade), len(by_spec), len(pair), top_grades_for_spec, top_specs_for_grade
+    stats = HistoryStats(
+        n_grade=len(by_grade), n_spec=len(by_spec), n_pair=len(pair),
+        top_grades_for_spec=top_grades_for_spec,
+        top_specs_for_grade=top_specs_for_grade,
+    )
+
+    # Use the pair (grade x spec) for detailed stats; fall back to by_grade
+    base = pair if not pair.empty else by_grade
+    if base.empty:
+        return stats
+
+    # Mechanical stats with quality filter
+    mech = filter_mechanical(base)
+    stats.mech_n = len(mech)
+    if not mech.empty:
+        tbl = pd.to_numeric(mech.get("TBL_ACT"), errors="coerce").dropna()
+        stats.thickness_min = _stat_or_none(tbl, "min")
+        stats.thickness_max = _stat_or_none(tbl, "max")
+        stats.thickness_avg = _stat_or_none(tbl, "mean")
+
+        ft = pd.to_numeric(mech.get("FT_AV"), errors="coerce").dropna()
+        stats.ft_min = _stat_or_none(ft, "min")
+        stats.ft_max = _stat_or_none(ft, "max")
+        stats.ft_avg = _stat_or_none(ft, "mean")
+
+        ct = pd.to_numeric(mech.get("CT_AV"), errors="coerce").dropna()
+        stats.ct_min = _stat_or_none(ct, "min")
+        stats.ct_max = _stat_or_none(ct, "max")
+        stats.ct_avg = _stat_or_none(ct, "mean")
+
+        ys = pd.to_numeric(mech.get("YS"), errors="coerce").dropna()
+        stats.ys_min = _stat_or_none(ys, "min")
+        stats.ys_max = _stat_or_none(ys, "max")
+        stats.ys_out_pct = _pct_out_of_spec(ys, spec_ys_min, spec_ys_max)
+
+        ts = pd.to_numeric(mech.get("TS"), errors="coerce").dropna()
+        stats.ts_min = _stat_or_none(ts, "min")
+        stats.ts_max = _stat_or_none(ts, "max")
+        stats.ts_out_pct = _pct_out_of_spec(ts, spec_ts_min, spec_ts_max)
+
+        elo = pd.to_numeric(mech.get("ELO"), errors="coerce").dropna()
+        stats.elo_min = _stat_or_none(elo, "min")
+        stats.elo_max = _stat_or_none(elo, "max")
+        stats.elo_out_pct = _pct_out_of_spec(elo, spec_elo_min, spec_elo_max)
+
+    # Chemical stats with quality filter
+    chem = filter_chemical(base)
+    stats.chem_n = len(chem)
+
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -515,24 +640,90 @@ def _fmt_pair(lo: float | None, hi: float | None, decimals: int = 4,
     return fmt.fmt_range(lo_v, hi_v, decimals=decimals)
 
 
-def _format_chem_block(rep: ChemReport) -> str:
-    head = (
-        f"1. CHEMICAL COMPATIBILITY  ({rep.verdict};  "
-        f"{rep.n_pass} PASS, {rep.n_fail} FAIL, {rep.n_na} N/A)"
+def _format_history_block_v2(hs: HistoryStats) -> str:
+    """New emoji-based historical data block."""
+    lines = ["2\ufe0f\u20e3 HISTORICAL DATA"]
+    lines.append(f"   Records: {hs.mech_n:,}")
+
+    def _range_line(label: str, lo: float | None, hi: float | None,
+                    avg: float | None, unit: str,
+                    out_pct: float | None = None) -> str:
+        lo_s = fmt_number(lo, 1) if lo is not None else "-"
+        hi_s = fmt_number(hi, 1) if hi is not None else "-"
+        avg_s = fmt_number(avg, 1) if avg is not None else "-"
+        base = f"   \u2022 {label}: {lo_s}-{hi_s} {unit} (avg: {avg_s})"
+        if out_pct is not None:
+            base += f", %Out={out_pct}%"
+        return base
+
+    lines.append(_range_line("Thickness", hs.thickness_min, hs.thickness_max, hs.thickness_avg, "mm"))
+    lines.append(_range_line("FT", hs.ft_min, hs.ft_max, hs.ft_avg, "\u00b0C"))
+    lines.append(_range_line("CT", hs.ct_min, hs.ct_max, hs.ct_avg, "\u00b0C"))
+    lines.append(_range_line("YS", hs.ys_min, hs.ys_max, None, "MPa", hs.ys_out_pct))
+    lines.append(_range_line("TS", hs.ts_min, hs.ts_max, None, "MPa", hs.ts_out_pct))
+    lines.append(_range_line("ELO", hs.elo_min, hs.elo_max, None, "%", hs.elo_out_pct))
+
+    return "\n".join(lines)
+
+
+def _format_deboer_block(mech_rep: MechReport | None, combos: list[ParamCombo] | None = None) -> str:
+    """New emoji-based Deboer prediction block."""
+    if mech_rep is None:
+        return "3\ufe0f\u20e3 DEBOER PREDICTION\n   (tidak bisa dievaluasi)"
+
+    total = len(mech_rep.rows)
+    compat = sum(1 for r in mech_rep.rows if r.verdict == "PASS")
+    pct = round(100.0 * compat / total, 0) if total > 0 else 0
+
+    lines = ["3\ufe0f\u20e3 DEBOER PREDICTION"]
+    lines.append(f"   Compatible: {compat}/{total} ({pct:.0f}%)")
+    
+    # Extract YS and TS for the inline string
+    ys_pred, ts_pred = "n/a", "n/a"
+    for r in mech_rep.rows:
+        pred_str = ""
+        if r.predicted_min is not None and r.predicted_max is not None:
+            pred_str = f"{r.predicted_min:.0f}-{r.predicted_max:.0f}"
+        elif r.predicted_min is not None:
+            pred_str = f"\u2265{r.predicted_min:.0f}"
+        else:
+            pred_str = "n/a"
+        
+        if r.prop_name == "YS":
+            ys_pred = pred_str
+        elif r.prop_name == "TS":
+            ts_pred = pred_str
+
+    lines.append(
+        f"   Best: FT={mech_rep.ft.target}\u00b0C, "
+        f"CT={mech_rep.ct.target}\u00b0C \u2192 YS={ys_pred}, TS={ts_pred}"
     )
-    rows = []
+
+    if combos and len(combos) > 1:
+        lines.append("   Alternatif:")
+        for c in combos[1:]:
+            lines.append(
+                f"    - FT {c.ft.code}, CT {c.ct.code} \u2192 {c.mech.verdict}"
+            )
+
+    return "\n".join(lines)
+
+
+def _format_chem_block(rep: ChemReport, chem_n: int = 0) -> str:
+    emoji = "\u2705" if rep.verdict == "PASS" else "\u274c"
+    status = "Compatible" if rep.verdict == "PASS" else "Not Compatible"
+    head = f"1\ufe0f\u20e3 CHEMICAL\n   {emoji} {status}"
+    if chem_n > 0:
+        head += f" ({chem_n} samples)"
+
+    lines: list[str] = [head]
     for r in rep.rows:
-        verdict = r.verdict
-        if r.verdict == "FAIL":
-            verdict += f"  ({r.reason})"
-        rows.append([
-            r.element,
-            _fmt_pair(r.design_min, r.design_max),
-            _fmt_pair(r.std_min, r.std_max),
-            verdict,
-        ])
-    table = fmt.fixed_table(["Element", "Design", "Spec Std", "Verdict"], rows)
-    return f"{head}\n{table}"
+        if r.verdict == "N/A":
+            continue
+        design_str = _fmt_pair(r.design_min, r.design_max)
+        std_str = _fmt_pair(r.std_min, r.std_max)
+        lines.append(f"   \u2022 {r.element}: {design_str} (std: {std_str})")
+    return "\n".join(lines)
 
 
 def _format_mech_block(rep: MechReport, swept: bool, alts: list[ParamCombo] | None = None) -> str:
@@ -560,7 +751,7 @@ def _format_mech_block(rep: MechReport, swept: bool, alts: list[ParamCombo] | No
             verdict += f"  ({r.reason})"
         elif r.verdict == "N/A" and r.reason:
             verdict += f"  ({r.reason})"
-        rows.append([r.property, pred, std, r.unit, verdict])
+        rows.append([r.prop_name, pred, std, r.unit, verdict])
     table = fmt.fixed_table(["Property", "Predicted", "Std", "Unit", "Verdict"], rows)
 
     parts = [head, params, table]
@@ -608,24 +799,24 @@ def _format_hardenability_block(rep: MechReport | None) -> str:
 
 def _format_history_block(
     grade: str, spec: str,
-    n_grade: int, n_spec: int, n_pair: int,
-    top_grades_for_spec: list[tuple[str, int]],
-    top_specs_for_grade: list[tuple[str, int]],
+    hs: HistoryStats,
 ) -> str:
+    years = production_years()
+    year_str = ", ".join(years) if years and years != ["unknown"] else "2021"
     lines = [
-        "4. PRODUCTION HISTORY (Produksi 2021)",
-        f"  Grade {grade}: {n_grade:,} coils total in 2021",
-        f"  Spec  {spec}: {n_spec:,} coils total in 2021",
-        f"  Pair  (grade x spec): {n_pair:,} coils  "
-        + ("(NEVER produced this combination)" if n_pair == 0 else ""),
+        f"4. PRODUCTION HISTORY (Produksi {year_str})",
+        f"  Grade {grade}: {hs.n_grade:,} coils",
+        f"  Spec  {spec}: {hs.n_spec:,} coils",
+        f"  Pair  (grade x spec): {hs.n_pair:,} coils  "
+        + ("(NEVER produced this combination)" if hs.n_pair == 0 else ""),
     ]
-    if top_grades_for_spec:
-        lines.append(f"  Top grades historically used for spec {spec}:")
-        for g, c in top_grades_for_spec:
+    if hs.top_grades_for_spec:
+        lines.append(f"  Top grades for spec {spec}:")
+        for g, c in hs.top_grades_for_spec:
             lines.append(f"    - {g}: {c:,} coils")
-    if top_specs_for_grade:
-        lines.append(f"  Top specs historically using grade {grade}:")
-        for s, c in top_specs_for_grade:
+    if hs.top_specs_for_grade:
+        lines.append(f"  Top specs for grade {grade}:")
+        for s, c in hs.top_specs_for_grade:
             lines.append(f"    - {s}: {c:,} coils")
     return "\n".join(lines)
 
@@ -672,23 +863,40 @@ def feasibility_analysis(
     spec_chem = _spec_chem_row(spec)
     if spec_chem is None:
         chem_rep = ChemReport(rows=[], verdict="N/A", n_pass=0, n_fail=0, n_na=0)
-        chem_block = (
-            "1. CHEMICAL COMPATIBILITY\n"
-            "  Spec ini tidak punya entry di HR_Chem_Std — chem check di-skip."
-        )
     else:
         chem_rep = check_chemical_compatibility(grade_row, spec_chem)
-        chem_block = _format_chem_block(chem_rep)
+
+    # Resolve mech spec limits for %Out calculation
+    spec_mech = _spec_mech_row(spec, thickness_mm or 8.0)
+    spec_ys_min = spec_ys_max = spec_ts_min = spec_ts_max = None
+    spec_elo_min = spec_elo_max = None
+    if spec_mech is not None:
+        v = spec_mech.get("Mechanical Std YS Min")
+        spec_ys_min = None if pd.isna(v) else float(v)
+        v = spec_mech.get("Mechanical Std YS Max")
+        spec_ys_max = None if pd.isna(v) else float(v)
+        v = spec_mech.get("Mechanical Std Tensile Min")
+        spec_ts_min = None if pd.isna(v) else float(v)
+        v = spec_mech.get("Mechanical Std Tensile Max")
+        spec_ts_max = None if pd.isna(v) else float(v)
+
+    # Get enriched history stats with data quality filtering
+    hs = _history_stats(
+        grade, spec,
+        spec_ys_min=spec_ys_min, spec_ys_max=spec_ys_max,
+        spec_ts_min=spec_ts_min, spec_ts_max=spec_ts_max,
+        spec_elo_min=spec_elo_min, spec_elo_max=spec_elo_max,
+    )
 
     # mech — either user-specified or swept
     mech_rep: MechReport | None = None
+    combos: list[ParamCombo] = []
     if ft_code and ct_code and thickness_mm:
         ft = FT_CODES.get(ft_code.strip().upper())
         ct = CT_CODES.get(ct_code.strip().upper())
         if not ft or not ct:
             return f"FT/CT code '{ft_code}/{ct_code}' tidak valid."
         mech_rep = _build_mech_report(grade_row, spec, thickness_mm, ft, ct)
-        mech_block = _format_mech_block(mech_rep, swept=False)
     else:
         sweep_thickness = [thickness_mm] if thickness_mm else _DEFAULT_THICKNESS_SWEEP_MM
         ft_subset = [FT_CODES[ft_code.strip().upper()]] if ft_code else None
@@ -699,24 +907,21 @@ def feasibility_analysis(
         )
         if combos:
             mech_rep = combos[0].mech
-            mech_block = _format_mech_block(mech_rep, swept=True, alts=combos[1:])
-        else:
-            mech_block = "2. MECHANICAL FEASIBILITY\n  (tidak bisa dievaluasi)"
 
-    hw_block = _format_hardenability_block(mech_rep)
-
-    n_grade, n_spec, n_pair, top_grades_for_spec, top_specs_for_grade = _history_stats(grade, spec)
-    history_block = _format_history_block(
-        grade, spec, n_grade, n_spec, n_pair,
-        top_grades_for_spec, top_specs_for_grade,
-    )
+    # Build new emoji-format output
+    chem_block = _format_chem_block(chem_rep, chem_n=hs.chem_n)
+    history_block = _format_history_block_v2(hs)
+    deboer_block = _format_deboer_block(mech_rep, combos=combos)
 
     verdict = _overall_verdict(chem_rep, mech_rep)
+    emoji_verdict = "\u2705" if verdict == "FEASIBLE" else "\u274c"
     summary = (
-        f"FEASIBILITY ANALYSIS — Grade {grade}  ->  Spec {spec}\n"
-        f"VERDICT: {verdict}"
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        f"{grade} \u2192 {spec}\n"
+        f"VERDICT: {emoji_verdict} {verdict}\n"
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
     )
-    return fmt.join_blocks(summary, chem_block, mech_block, hw_block, history_block)
+    return fmt.join_blocks(summary, chem_block, history_block, deboer_block)
 
 
 # ---------------------------------------------------------------------------
@@ -798,7 +1003,7 @@ def find_compatible_grades(specification: str, top_n: int = 10) -> str:
 def _clamp_or_none(v: float | None) -> float | None:
     if v is None:
         return None
-    if v >= _STD_SENTINEL:
+    if v >= _CHEM_SENTINEL:
         return None
     return v
 
@@ -895,8 +1100,8 @@ def recommend_production_params(
 
     rows = []
     for c in combos:
-        ys_row = next((r for r in c.mech.rows if r.property == "YS"), None)
-        ts_row = next((r for r in c.mech.rows if r.property == "TS"), None)
+        ys_row = next((r for r in c.mech.rows if r.prop_name == "YS"), None)
+        ts_row = next((r for r in c.mech.rows if r.prop_name == "TS"), None)
         ys_pred = (
             f"{ys_row.predicted_min:.0f}-{ys_row.predicted_max:.0f}" if ys_row else "-"
         )
