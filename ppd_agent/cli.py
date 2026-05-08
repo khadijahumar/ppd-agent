@@ -453,6 +453,75 @@ def config_set(key: str, value: str) -> None:
     click.echo(f"Set {key} in {env_path}")
 
 
+# -- new commands ------------------------------------------------------------
+
+
+@cli.command()
+def update() -> None:
+    """Update PPD Agent to the latest version from GitHub."""
+    import subprocess
+    click.echo("Mengambil pembaruan terbaru dari GitHub...")
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pipx", "install", "--force", "git+https://github.com/khadijahumar/ppd-agent.git"]
+        )
+        print_ok("PPD Agent berhasil diupdate! Silakan jalankan 'ppd start' kembali.")
+    except subprocess.CalledProcessError:
+        print_fail("Gagal mengupdate PPD Agent. Pastikan internet Anda lancar dan pipx terinstall.")
+
+
+@cli.command()
+def uninstall() -> None:
+    """Uninstall PPD Agent completely."""
+    import subprocess
+    if not click.confirm("Apakah Anda yakin ingin MENGHAPUS PPD Agent dari komputer ini?", default=False):
+        click.echo("Dibatalkan.")
+        return
+        
+    try:
+        subprocess.check_call([sys.executable, "-m", "pipx", "uninstall", "ppd-agent"])
+        print_ok("Aplikasi PPD Agent berhasil dihapus dari sistem (pipx).")
+    except subprocess.CalledProcessError:
+        print_warn("Gagal menghapus via pipx. Mungkin PPD Agent tidak diinstall via pipx.")
+    
+    home = _home()
+    if click.confirm(f"Apakah Anda juga ingin MENGHAPUS semua data dan konfigurasi di {home}?", default=False):
+        try:
+            shutil.rmtree(home)
+            print_ok(f"Folder {home} beserta isinya berhasil dihapus.")
+        except Exception as e:
+            print_fail(f"Gagal menghapus folder {home}: {e}")
+    
+    print_ok("Uninstall selesai.")
+
+
+@cli.command("custom-model")
+def custom_model() -> None:
+    """Setup a custom LLM provider interactively."""
+    click.echo("=== Setup Custom LLM Provider ===")
+    click.echo("Anda bisa memasukkan endpoint OpenAI-compatible dari provider manapun (misal: Hermes, Ollama, LMStudio, dll).")
+    
+    base_url = click.prompt("1. Masukkan Base URL (contoh: https://api.hermes.com/v1)", type=str).strip()
+    api_key = click.prompt("2. Masukkan API Key (tekan enter jika kosong)", default="", show_default=False).strip()
+    model_name = click.prompt("3. Masukkan Nama Model", type=str).strip()
+    
+    env_path = _env_path()
+    data = _read_env_file(env_path)
+    
+    data["LLM_PROVIDER"] = "custom"
+    data["LLM_BASE_URL"] = base_url
+    data["LLM_API_KEY"] = api_key
+    data["PPD_MODEL"] = model_name
+    
+    _write_env_file(env_path, data, comment_header="PPD Assistant configuration.")
+    click.echo()
+    print_ok("Konfigurasi Custom LLM berhasil disimpan!")
+    print_info(f"  Provider  : custom")
+    print_info(f"  Base URL  : {base_url}")
+    print_info(f"  Model     : {model_name}")
+    print_info(f"Konfigurasi telah disimpan di {env_path}")
+
+
 # -- entry point -------------------------------------------------------------
 
 
