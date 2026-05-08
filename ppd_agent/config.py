@@ -7,9 +7,37 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from PPD_HOME first (pipx install), then fall back to cwd/.env
+_ppd_home_env = os.getenv("PPD_HOME")
+if _ppd_home_env:
+    load_dotenv(Path(_ppd_home_env).expanduser() / ".env")
+else:
+    _default_ppd = Path.home() / ".ppd" / ".env"
+    if _default_ppd.is_file():
+        load_dotenv(_default_ppd)
+    else:
+        load_dotenv()
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+
+def _resolve_home() -> Path:
+    """Resolve the PPD home directory.
+
+    Priority:
+    1. ``PPD_HOME`` environment variable (explicit override).
+    2. The repo root (parent of this package) if it contains a ``data/`` dir
+       — i.e. running from a git clone.
+    3. ``~/.ppd`` — default for pipx / end-user installs.
+    """
+    env = os.getenv("PPD_HOME")
+    if env:
+        return Path(env).expanduser()
+    repo_root = Path(__file__).resolve().parent.parent
+    if (repo_root / "data").is_dir():
+        return repo_root
+    return Path.home() / ".ppd"
+
+
+REPO_ROOT = _resolve_home()
 
 
 def _parse_user_ids(raw: str) -> list[int]:
