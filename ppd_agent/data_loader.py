@@ -1,4 +1,9 @@
-"""Cached parquet loaders. Each table is loaded once on first access."""
+"""Cached parquet loaders. Each table is loaded once on first access.
+
+Production data supports multiple years: any file matching
+``produksi_*_hrc.parquet`` in the parquet directory is loaded and
+concatenated automatically.
+"""
 from __future__ import annotations
 
 import logging
@@ -53,11 +58,44 @@ def load_chemical_design() -> pd.DataFrame:
 
 @lru_cache(maxsize=1)
 def load_produksi_hrc() -> pd.DataFrame:
-    """Production data 2021 HRC. ~290k rows; cached so subsequent calls are instant."""
-    log.info("loading produksi_2021_hrc.parquet ...")
-    df = pd.read_parquet(_path("produksi_2021_hrc"))
-    log.info("  loaded %d rows", len(df))
-    return df
+    """Load ALL production HRC parquet files and concatenate them.
+
+    Scans for ``produksi_*_hrc.parquet`` so adding a new year is as simple
+    as dropping ``produksi_2022_hrc.parquet`` into the parquet directory.
+    Falls back to the legacy single-file name for backward compat.
+    """
+    parquet_dir = CONFIG.parquet_dir
+    pattern = "produksi_*_hrc.parquet"
+    files = sorted(parquet_dir.glob(pattern))
+
+    if not files:
+        legacy = parquet_dir / "produksi_2021_hrc.parquet"
+        if legacy.exists():
+            files = [legacy]
+        else:
+            log.warning("No production HRC parquet files found in %s", parquet_dir)
+            return pd.DataFrame()
+
+    frames: list[pd.DataFrame] = []
+    for f in files:
+        log.info("loading %s ...", f.name)
+        df = pd.read_parquet(f)
+        year_tag = f.stem.split("_")[1] if "_" in f.stem else "unknown"
+        df["_source_year"] = year_tag
+        frames.append(df)
+        log.info("  loaded %d rows from %s", len(df), f.name)
+
+    combined = pd.concat(frames, ignore_index=True)
+    log.info("total production rows: %d (from %d file(s))", len(combined), len(files))
+    return combined
+
+
+def production_years() -> list[str]:
+    """Return list of year tags available in the loaded production data."""
+    df = load_produksi_hrc()
+    if "_source_year" not in df.columns:
+        return ["unknown"]
+    return sorted(df["_source_year"].unique().tolist())
 
 
 def warmup() -> None:
@@ -70,3 +108,5 @@ def warmup() -> None:
     load_z001()
     load_chemical_design()
     load_produksi_hrc()
+    years = production_years()
+    log.info("production data years: %s", ", ".join(years))

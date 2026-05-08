@@ -1,15 +1,4 @@
-"""Centralised configuration loaded from ``$PPD_HOME/.env``.
-
-Path resolution priority (highest first):
-
-1. Explicit env vars (``PPD_DATA_DIR`` etc.) — full override.
-2. ``$PPD_HOME`` — base directory; subfolders ``data/raw``, ``data/parquet``,
-   ``data/plots`` and ``.env`` live inside it.
-3. **Dev-mode fallback**: if a sibling ``data/`` folder exists next to the
-   ``ppd_agent/`` package on disk, use it (so working from a checkout of the
-   repo "just works" without setting any env var).
-4. ``~/.ppd`` (the production default after ``ppd init``).
-"""
+"""Centralised configuration loaded from environment variables."""
 from __future__ import annotations
 
 import os
@@ -18,32 +7,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+load_dotenv()
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-_DEV_DATA_DIR = REPO_ROOT / "data"
-
-
-def _resolve_home() -> Path:
-    """Resolve ``PPD_HOME`` once, with the priority described above."""
-    env_home = os.getenv("PPD_HOME")
-    if env_home:
-        return Path(env_home).expanduser()
-    if _DEV_DATA_DIR.is_dir():
-        # working out of a repo checkout — keep using the repo's data folder
-        return REPO_ROOT
-    return Path.home() / ".ppd"
-
-
-PPD_HOME: Path = _resolve_home()
-
-
-# Load .env *before* the dataclass field defaults run, so values are visible
-# to ``os.getenv`` calls inside the dataclass.
-_DOTENV_PATH = PPD_HOME / ".env"
-if _DOTENV_PATH.is_file():
-    load_dotenv(_DOTENV_PATH)
-else:
-    # Fallback: also load a project-local .env if present (dev convenience).
-    load_dotenv()
 
 
 def _parse_user_ids(raw: str) -> list[int]:
@@ -61,24 +27,84 @@ def _parse_user_ids(raw: str) -> list[int]:
     return out
 
 
-def _default_data_dir() -> Path:
-    return Path(os.getenv("PPD_DATA_DIR", str(PPD_HOME / "data")))
+# ---------------------------------------------------------------------------
+# LLM provider presets
+# ---------------------------------------------------------------------------
+
+_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "env_key": "OPENROUTER_API_KEY",
+        "default_model": "anthropic/claude-sonnet-4",
+    },
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "env_key": "OPENAI_API_KEY",
+        "default_model": "gpt-4o",
+    },
+    "anthropic-openai": {
+        "base_url": "https://api.anthropic.com/v1",
+        "env_key": "ANTHROPIC_API_KEY",
+        "default_model": "claude-sonnet-4-20250514",
+    },
+    "google": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "env_key": "GOOGLE_API_KEY",
+        "default_model": "gemini-2.0-flash",
+    },
+    "deepseek": {
+        "base_url": "https://api.deepseek.com/v1",
+        "env_key": "DEEPSEEK_API_KEY",
+        "default_model": "deepseek-chat",
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "env_key": "GROQ_API_KEY",
+        "default_model": "llama-3.3-70b-versatile",
+    },
+}
 
 
-def _default_subdir(env_var: str, leaf: str) -> Path:
-    explicit = os.getenv(env_var)
-    if explicit:
-        return Path(explicit)
-    return _default_data_dir() / leaf
+def _resolve_provider() -> tuple[str, str, str]:
+    """Return (base_url, api_key, default_model) from LLM_PROVIDER + env vars.
+
+    Falls back to ``openrouter`` for backward compatibility.
+    ``LLM_BASE_URL`` overrides the preset URL (for self-hosted endpoints).
+    """
+    provider = os.getenv("LLM_PROVIDER", "openrouter").lower().strip()
+    preset = _PROVIDER_PRESETS.get(provider)
+
+    if preset is None:
+        base_url = os.getenv("LLM_BASE_URL", "")
+        api_key = os.getenv("LLM_API_KEY", "")
+        default_model = os.getenv("PPD_MODEL", "")
+        if not base_url or not api_key:
+            raise RuntimeError(
+                f"LLM_PROVIDER='{provider}' is not a built-in preset "
+                f"({', '.join(_PROVIDER_PRESETS)}). "
+                "Set LLM_BASE_URL and LLM_API_KEY manually."
+            )
+        return base_url, api_key, default_model
+
+    base_url = os.getenv("LLM_BASE_URL", preset["base_url"])
+    api_key = os.getenv(preset["env_key"], os.getenv("LLM_API_KEY", ""))
+    default_model = preset["default_model"]
+    return base_url, api_key, default_model
 
 
 @dataclass(frozen=True)
 class Config:
-    home: Path = field(default_factory=lambda: PPD_HOME)
-    env_path: Path = field(default_factory=lambda: _DOTENV_PATH)
+    # LLM provider (resolved from LLM_PROVIDER env var)
+    llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "openrouter"))
+    llm_base_url: str = field(default_factory=lambda: _resolve_provider()[0])
+    llm_api_key: str = field(default_factory=lambda: _resolve_provider()[1])
+    model: str = field(default_factory=lambda: os.getenv("PPD_MODEL", "") or _resolve_provider()[2])
 
-    openrouter_api_key: str = field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""))
-    model: str = field(default_factory=lambda: os.getenv("PPD_MODEL", "anthropic/claude-sonnet-4"))
+    # Backward compat
+    openrouter_api_key: str = field(
+        default_factory=lambda: os.getenv("OPENROUTER_API_KEY", "")
+    )
+
     site_url: str = field(default_factory=lambda: os.getenv("PPD_SITE_URL", ""))
     app_name: str = field(default_factory=lambda: os.getenv("PPD_APP_NAME", "PPD Assistant"))
 
@@ -87,15 +113,33 @@ class Config:
         default_factory=lambda: _parse_user_ids(os.getenv("TELEGRAM_ALLOWED_USER_IDS", ""))
     )
 
-    data_dir: Path = field(default_factory=_default_data_dir)
-    raw_dir: Path = field(default_factory=lambda: _default_subdir("PPD_RAW_DIR", "raw"))
-    parquet_dir: Path = field(default_factory=lambda: _default_subdir("PPD_PARQUET_DIR", "parquet"))
-    plots_dir: Path = field(default_factory=lambda: _default_subdir("PPD_PLOTS_DIR", "plots"))
+    data_dir: Path = field(default_factory=lambda: Path(os.getenv("PPD_DATA_DIR", str(REPO_ROOT / "data"))))
+    raw_dir: Path = field(default_factory=lambda: Path(os.getenv("PPD_RAW_DIR", str(REPO_ROOT / "data" / "raw"))))
+    parquet_dir: Path = field(default_factory=lambda: Path(os.getenv("PPD_PARQUET_DIR", str(REPO_ROOT / "data" / "parquet"))))
+    plots_dir: Path = field(default_factory=lambda: Path(os.getenv("PPD_PLOTS_DIR", str(REPO_ROOT / "data" / "plots"))))
 
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
 
+    # Rate limiting
+    rate_limit_per_user: int = field(
+        default_factory=lambda: int(os.getenv("RATE_LIMIT_PER_USER", "20"))
+    )
+    rate_limit_window_seconds: int = field(
+        default_factory=lambda: int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+    )
+
+    # Context window management
+    max_context_messages: int = field(
+        default_factory=lambda: int(os.getenv("MAX_CONTEXT_MESSAGES", "40"))
+    )
+
+    @property
+    def effective_api_key(self) -> str:
+        """Return the best available API key."""
+        return self.llm_api_key or self.openrouter_api_key
+
     def ensure_dirs(self) -> None:
-        for d in (self.home, self.data_dir, self.raw_dir, self.parquet_dir, self.plots_dir):
+        for d in (self.data_dir, self.raw_dir, self.parquet_dir, self.plots_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 

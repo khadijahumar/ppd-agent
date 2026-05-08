@@ -1,8 +1,9 @@
-"""Tool-calling agent loop using OpenRouter (OpenAI-compatible API)."""
+"""Tool-calling agent loop using OpenAI-compatible API (multi-provider)."""
 from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,8 @@ from .tools._types import as_str, collect_images
 log = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 6
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [1, 3, 9]
 
 
 # ---------------------------------------------------------------------------
@@ -326,23 +329,65 @@ class PPDAgent:
     """Stateful conversation agent (one instance per Telegram chat)."""
 
     def __init__(self, model: str | None = None) -> None:
-        if not CONFIG.openrouter_api_key:
+        api_key = CONFIG.effective_api_key
+        if not api_key:
             raise RuntimeError(
-                "OPENROUTER_API_KEY not set. Copy .env.example to .env and fill it in."
+                "No LLM API key configured. Set OPENROUTER_API_KEY (or "
+                "LLM_PROVIDER + matching key) in .env. See .env.example."
             )
+        headers: dict[str, str] = {}
+        if CONFIG.llm_provider == "openrouter":
+            headers["HTTP-Referer"] = CONFIG.site_url or "https://github.com/zandyumar10-afk/ppd-agent"
+            headers["X-Title"] = CONFIG.app_name
         self.client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=CONFIG.openrouter_api_key,
-            default_headers={
-                "HTTP-Referer": CONFIG.site_url or "https://github.com/khadijahumar/ppd-agent",
-                "X-Title": CONFIG.app_name,
-            },
+            base_url=CONFIG.llm_base_url,
+            api_key=api_key,
+            default_headers=headers or None,
         )
         self.model = model or CONFIG.model
         self.messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # -- context window management ------------------------------------------
+
+    def _trim_context(self) -> None:
+        """Keep conversation within max_context_messages.
+
+        Preserves the system prompt (index 0) and the most recent messages.
+        Old messages are summarised into a single compact message so the LLM
+        retains some context of earlier turns.
+        """
+        limit = CONFIG.max_context_messages
+        if len(self.messages) <= limit:
+            return
+
+        keep = limit - 2  # room for system + summary
+        old = self.messages[1:-keep]
+        recent = self.messages[-keep:]
+
+        summary_parts: list[str] = []
+        for m in old:
+            role = m.get("role", "")
+            content = (m.get("content") or "")[:200]
+            if role == "user":
+                summary_parts.append(f"User: {content}")
+            elif role == "assistant" and content:
+                summary_parts.append(f"Assistant: {content}")
+
+        summary_text = (
+            "[Earlier conversation trimmed for context limit]\n"
+            + "\n".join(summary_parts[-10:])
+        )
+        self.messages = (
+            [self.messages[0]]
+            + [{"role": "system", "content": summary_text}]
+            + recent
+        )
+        log.info("trimmed context: %d old msgs → summary + %d recent", len(old), len(recent))
+
+    # -- tool execution -----------------------------------------------------
 
     def _execute_tool(self, name: str, args_json: str) -> tuple[str, list[Path]]:
         if name not in _TOOL_INDEX:
@@ -360,27 +405,45 @@ class PPDAgent:
             return (f"ERROR di tool {name}: {exc}", [])
         return (as_str(result), collect_images(result))
 
-    def chat(self, user_message: str) -> AgentTurn:
-        self.messages.append({"role": "user", "content": user_message})
-        collected_images: list[Path] = []
-        called_tools: list[str] = []
+    # -- LLM call with retry ------------------------------------------------
 
-        for it in range(MAX_TOOL_ITERATIONS):
+    def _llm_call(self, messages: list[dict]) -> Any:
+        """Call the LLM with exponential-backoff retry."""
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
             try:
-                resp = self.client.chat.completions.create(
+                return self.client.chat.completions.create(
                     model=self.model,
-                    messages=self.messages,
+                    messages=messages,
                     tools=openai_tool_specs(),
                     tool_choice="auto",
                     temperature=0.1,
                 )
             except Exception as exc:
-                log.exception("OpenRouter call failed")
+                last_exc = exc
+                wait = _RETRY_BACKOFF[attempt] if attempt < len(_RETRY_BACKOFF) else 9
+                log.warning("LLM call attempt %d failed: %s — retrying in %ds", attempt + 1, exc, wait)
+                time.sleep(wait)
+        raise last_exc  # type: ignore[misc]
+
+    # -- main chat loop -----------------------------------------------------
+
+    def chat(self, user_message: str) -> AgentTurn:
+        self.messages.append({"role": "user", "content": user_message})
+        self._trim_context()
+        collected_images: list[Path] = []
+        called_tools: list[str] = []
+
+        for it in range(MAX_TOOL_ITERATIONS):
+            try:
+                resp = self._llm_call(self.messages)
+            except Exception as exc:
+                log.exception("LLM call failed after retries")
                 return AgentTurn(text="", error=f"LLM call failed: {exc}")
 
             choice = resp.choices[0]
             msg = choice.message
-            tool_calls = getattr(msg, "tool_calls", None) or []
+            tool_calls = msg.tool_calls or []
 
             assistant_msg: dict = {"role": "assistant", "content": msg.content or ""}
             if tool_calls:
@@ -398,7 +461,6 @@ class PPDAgent:
             self.messages.append(assistant_msg)
 
             if not tool_calls:
-                # final answer
                 return AgentTurn(
                     text=msg.content or "",
                     image_paths=collected_images,
