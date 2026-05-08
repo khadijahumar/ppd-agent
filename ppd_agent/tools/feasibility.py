@@ -362,7 +362,7 @@ def _build_elo_informational(spec: str, thickness_mm: float) -> MechCheck | None
     if elo_min is None:
         return None
     return MechCheck(
-        property="ELO",
+        prop_name="ELO",
         predicted_min=None, predicted_max=None,
         std_min=elo_min, std_max=None,
         unit="%", verdict="N/A",

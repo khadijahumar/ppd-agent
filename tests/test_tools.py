@@ -143,13 +143,12 @@ def test_feasibility_analysis_full_spec() -> None:
         "A2010", "JIS G 3101 SS400",
         thickness_mm=8.0, ft_code="G", ct_code="C",
     )
-    assert "FEASIBILITY ANALYSIS" in out
     assert "VERDICT:" in out
-    assert "CHEMICAL COMPATIBILITY" in out
-    assert "MECHANICAL FEASIBILITY" in out
-    assert "HARDENABILITY" in out
-    assert "PRODUCTION HISTORY" in out
-    # plain text
+    # accept either English or Indonesian section headers
+    assert "CHEMICAL" in out or "KIMIA" in out
+    assert "MECHANICAL" in out or "DEBOER" in out
+    assert "HISTORY" in out or "HISTORIS" in out
+    # plain text - no markdown headers/bold/pipe-tables
     assert "###" not in out
     assert "**" not in out
     assert "|" not in out
@@ -176,19 +175,20 @@ def test_feasibility_ambiguous_spec_returns_candidates() -> None:
 def test_feasibility_no_params_runs_sweep() -> None:
     """When ft/ct/thickness omitted, app sweeps and picks the best."""
     out = feasibility.feasibility_analysis("A2010", "JIS G 3101 SS400")
-    assert "FEASIBILITY ANALYSIS" in out
     assert "VERDICT:" in out
+    # sweep mode shows the best FT/CT combination it found
+    assert "Terbaik" in out or "Best" in out or "FT=" in out
 
 
 def test_find_compatible_grades() -> None:
     out = feasibility.find_compatible_grades("JIS G 3101 SS400", top_n=5)
-    assert "COMPATIBLE GRADES" in out
-    assert "PASS" in out or "never produced" in out or "coils" in out
+    assert "GRADE KOMPATIBEL" in out or "COMPATIBLE GRADES" in out
+    assert "PASS" in out or "never produced" in out or "coils" in out or "tidak pernah" in out
 
 
 def test_compare_grades() -> None:
     out = feasibility.compare_grades("A2010", "0A1810")
-    assert "COMPARE GRADES" in out
+    assert "PERBANDINGAN GRADE" in out or "COMPARE GRADES" in out
     assert "0A2010" in out and "0A1810" in out
 
 

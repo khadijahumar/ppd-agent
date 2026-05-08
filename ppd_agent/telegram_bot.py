@@ -71,7 +71,13 @@ def _build_welcome() -> str:
         "  • _Prediksi Deboer untuk grade 0A1810 tebal 8mm, FT 860, CT 590_\n"
         "  • _A2010 bisa untuk SS400?_\n"
         "  • _Saran FT/CT untuk A2010 supaya masuk SS400?_\n\n"
-        "Perintah: /reset (reset percakapan), /myid (lihat user ID kamu), /help"
+        "Perintah:\n"
+        "  /new          mulai percakapan baru (alias /reset)\n"
+        "  /model        tampilkan model aktif\n"
+        "  /model <nama> ganti model (mis. `/model openai/gpt-4o-mini`)\n"
+        "  /status       provider, model, jumlah message, dst\n"
+        "  /myid         tampilkan user ID Telegram-mu\n"
+        "  /help         pesan ini"
     )
 
 
@@ -152,6 +158,42 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     agent = _agent_for_chat(context)
     agent.model = new_model
     await update.message.reply_text(f"Model berhasil diubah ke: `{new_model}`", parse_mode="Markdown")
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show provider, active model, history length, and whitelist state."""
+    user = update.effective_user
+    if user is None or not _is_allowed(user.id):
+        return
+
+    has_agent = "agent" in context.chat_data
+    if has_agent:
+        agent = context.chat_data["agent"]
+        model = agent.model
+        history_len = sum(
+            1 for m in agent.messages if m.get("role") in ("user", "assistant")
+        )
+    else:
+        model = CONFIG.model
+        history_len = 0
+
+    provider = CONFIG.llm_provider or "openrouter"
+    base_url = CONFIG.llm_base_url or "(default)"
+    allowed_n = len(CONFIG.telegram_allowed_user_ids)
+
+    body = (
+        "*PPD Assistant — status*\n"
+        f"• Provider     : `{provider}`\n"
+        f"• Model        : `{model}`\n"
+        f"• Base URL     : `{base_url}`\n"
+        f"• History msgs : `{history_len}`\n"
+        f"• Whitelist    : `{'yes' if _is_allowed(user.id) else 'no'}` "
+        f"(`{allowed_n}` user(s) total)\n"
+        "\n"
+        "Reset percakapan: /reset (alias /new)\n"
+        "Ganti model    : /model <nama-model>"
+    )
+    await update.message.reply_text(body, parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +298,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("new", cmd_reset))
     app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     return app
 
